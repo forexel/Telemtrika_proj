@@ -1,0 +1,13 @@
+data/settings.json
+data/settings.json.tmp
+data/*.sqlite
+data/*.sqlite-shm
+data/*.sqlite-wal
+.env
+runtime.env
+public/
+frontend/.figma/
+frontend/AGENTS.md
+frontend/CLAUDE.md
+frontend/src/data/mock.ts
+frontend/src/imports/

@@ -1,0 +1,26 @@
+services:
+  app:
+    container_name: telemetrika-control-backend
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: telemetrika-control:local
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      HOST: 0.0.0.0
+      PORT: 18221
+      TELEMETRIKA_DB_PATH: /app/data/telemetrika.sqlite
+      TELEMETRIKA_SETTINGS_PATH: /app/data/settings.json
+    volumes:
+      - ./data:/app/data
+    ports:
+      - "127.0.0.1:${TELEMETRIKA_HOST_PORT:-18221}:18221"
+    networks:
+      - edge
+
+networks:
+  edge:
+    name: ${TELEMETRIKA_DOCKER_NETWORK:-apps-net}
+    external: true

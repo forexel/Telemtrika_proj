@@ -1,0 +1,15 @@
+.env
+.env.*
+!.env.example
+.DS_Store
+node_modules/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+runtime.env
+*.response.json
+api_results/
+spreadsheet_build/
+outputs/
+web_report/*.html
+__pycache__/

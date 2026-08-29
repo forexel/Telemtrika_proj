@@ -1,0 +1,11 @@
+.env
+runtime.env
+data
+frontend/node_modules
+frontend/dist
+public
+logs
+*.log
+.DS_Store
+.git
+.gitignore

@@ -1,0 +1,9 @@
+{
+  "name": "telemetrika-control",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node --experimental-sqlite server.js",
+    "check": "node --check server.js && node --check glonass_sync.js && node --check public/app.js"
+  }
+}

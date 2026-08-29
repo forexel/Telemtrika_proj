@@ -1,0 +1,78 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+@import 'tailwindcss';
+
+@theme {
+  --font-sans: 'Inter', system-ui, sans-serif;
+
+  --color-page: #F3F4F6;
+  --color-surface: #FFFFFF;
+  --color-text: #1F2937;
+  --color-text-secondary: #6B7280;
+  --color-heading: #243746;
+  --color-border: #E5E7EB;
+  --color-border-strong: #D1D5DB;
+
+  --color-blue: #2563A6;
+  --color-blue-hover: #1E4F8C;
+  --color-blue-light: #E8F1FA;
+  --color-blue-mid: #DBEAFE;
+
+  --color-green: #2E7D32;
+  --color-green-light: #E8F5E9;
+  --color-yellow: #E0A100;
+  --color-yellow-light: #FFF4CC;
+  --color-red: #C43D32;
+  --color-red-light: #FDE8E6;
+  --color-gray-badge: #808B94;
+  --color-gray-light: #EEF0F2;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  font-family: 'Inter', system-ui, sans-serif;
+  font-size: 14px;
+  color: #1F2937;
+  background: #F3F4F6;
+  margin: 0;
+  padding: 0;
+}
+
+/* Hide scrollbars by default, show on hover */
+.scrollable {
+  overflow: auto;
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+}
+.scrollable:hover {
+  scrollbar-color: #D1D5DB transparent;
+}
+
+/* Sticky table header */
+.sticky-thead thead th {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+
+/* Sticky first two columns */
+.sticky-col-1 {
+  position: sticky;
+  left: 0;
+  z-index: 5;
+  background: white;
+}
+.sticky-col-2 {
+  position: sticky;
+  left: 80px;
+  z-index: 5;
+  background: white;
+}
+
+thead .sticky-col-1,
+thead .sticky-col-2 {
+  z-index: 15;
+  background: #F9FAFB;
+}
