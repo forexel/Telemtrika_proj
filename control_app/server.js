@@ -199,6 +199,8 @@ function isoDate(value) { const match = String(value || "").match(/(\d{1,2})\.(\
 function sheetId(url) { const match = String(url || "").match(/\/spreadsheets\/d\/([a-zA-Z0-9_-]+)/); if (!match) throw new Error("Не удалось определить ID Google-таблицы"); return match[1]; }
 function columnNumber(column) { return String(column || "").toUpperCase().split("").reduce((value, letter) => value * 26 + letter.charCodeAt(0) - 64, 0); }
 function toColumn(number) { let result = ""; while (number > 0) { number -= 1; result = String.fromCharCode(65 + number % 26) + result; number = Math.floor(number / 26); } return result; }
+function isVehicleHeader(value) { return ["автомобиль", "автомобили", "техника", "модель", "марка", "госномер", "номер"].includes(normalizeText(value)); }
+function vehicleNameFromLabel(value) { const label = String(value || "").trim(); return label.replace(/[\s_-]+\d{3,4}\s*$/u, "").trim() || label || "Автомобиль"; }
 function parseCsv(text) {
   const rows = []; let row = [], value = "", quoted = false;
   for (let i = 0; i < text.length; i += 1) {
@@ -265,10 +267,19 @@ async function syncGoogle() {
     db.exec("BEGIN");
     try {
       const modelIndex = modelNumber - first, plateIndex = plateNumber - first;
-      const manualRows = new Set(db.prepare("SELECT source_row FROM vehicles WHERE manual_override=1 AND source_row IS NOT NULL").all().map(row => Number(row.source_row) % 100000));
       db.exec("DELETE FROM assignments WHERE source IN ('google','seed_glonass'); DELETE FROM employees;");
       for (const source of sources) {
-        source.vehicleRows.slice(1).forEach((row, index) => { const rowInSheet = index + 2, sourceRow = source.sourceIndex * 100000 + rowInSheet, name = String(row[modelIndex] || "").trim(), plate = String(row[plateIndex] || "").trim(); if (!manualRows.has(rowInSheet) && normalizePlate(plate)) upsertVehicle.run(name || "Автомобиль", plate, normalizePlate(plate), "google", sourceRow, now); });
+        source.vehicleRows.forEach((row, index) => {
+          const rowInSheet = index + 1, sourceRow = source.sourceIndex * 100000 + rowInSheet;
+          const rawName = String(row[modelIndex] || "").trim(), rawPlate = String(row[plateIndex] || "").trim();
+          const singleLabelColumn = modelNumber === plateNumber;
+          const name = singleLabelColumn ? vehicleNameFromLabel(rawPlate) : rawName;
+          const plate = rawPlate;
+          if (!normalizePlate(plate) || isVehicleHeader(plate) || (!singleLabelColumn && isVehicleHeader(name))) return;
+          const knownVehicles = db.prepare("SELECT id,name,plate FROM vehicles WHERE active=1").all();
+          if (singleLabelColumn && resolveVehicle(plate, knownVehicles)) return;
+          upsertVehicle.run(name || "Автомобиль", plate, normalizePlate(plate), "google", sourceRow, now);
+        });
         source.employeeRows.forEach((row, index) => { const name = String(row[1] || "").trim(), position = String(row[2] || "").trim(); if (name && position) upsertEmployee.run(name, position, source.sourceIndex * 100000 + index + 1, now); });
       }
       const vehicles = db.prepare("SELECT id,name,plate FROM vehicles WHERE active=1").all();
@@ -283,7 +294,7 @@ async function syncGoogle() {
         });
         const sharedCrewVehicle = directIds.length === 1 ? directIds[0] : crewVehicleIds.length === 1 ? crewVehicleIds[0] : null;
         for (const row of group) {
-          const direct = resolveVehicle(row.vehicle_label, vehicles), vehicleId = direct || sharedCrewVehicle;
+          const direct = resolveVehicle(row.vehicle_label, vehicles), vehicleId = direct || (!row.vehicle_label ? sharedCrewVehicle : null);
           insertAssignment.run(row.work_date, row.work_object, row.employee_name, row.work_type, row.vehicle_label, vehicleId, row.note, "google", row.source_row);
         }
       }
