@@ -6,11 +6,16 @@ interface TopBarProps {
   subtitle?: string;
   syncing: boolean;
   syncProgress: number;
-  onSync: () => void;
+  lastSync?: any;
+  syncError?: string;
+  onSync: () => void | Promise<void>;
   onRefresh: () => void;
 }
 
-export default function TopBar({ section, subtitle, syncing, syncProgress, onSync, onRefresh }: TopBarProps) {
+export default function TopBar({ section, subtitle, syncing, syncProgress, lastSync, syncError, onSync, onRefresh }: TopBarProps) {
+  const finished = lastSync?.finished_at ? new Date(lastSync.finished_at).toLocaleString("ru-RU", { timeZone: "Europe/Moscow", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }) : "ещё не выполнялась";
+  const status = lastSync?.status === "ok" ? "успешно" : lastSync?.status === "partial" ? "частично" : lastSync?.status === "error" ? "ошибка" : "нет результата";
+  const statusColor = syncError || lastSync?.status === "error" ? "bg-[#C43D32]" : lastSync?.status === "partial" ? "bg-[#E0A100]" : "bg-[#2E7D32]";
   return (
     <header className="h-14 bg-white border-b border-[#E5E7EB] flex items-center px-6 gap-4 shrink-0">
       {/* Title area */}
@@ -28,8 +33,8 @@ export default function TopBar({ section, subtitle, syncing, syncProgress, onSyn
           </div>
         ) : (
           <div className="flex items-center gap-1.5">
-            <span className="w-2 h-2 rounded-full bg-[#2E7D32] inline-block" />
-            <span className="text-xs text-[#6B7280]">Данные актуальны · обновлено сегодня в 02:15</span>
+            <span className={`w-2 h-2 rounded-full inline-block ${statusColor}`} />
+            <span className="text-xs text-[#6B7280]">{syncError ? `Ошибка: ${syncError}` : `Последняя синхронизация: ${finished} · ${status}`}</span>
           </div>
         )}
 

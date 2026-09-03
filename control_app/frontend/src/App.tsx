@@ -41,6 +41,8 @@ export default function App() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [syncProgress, setSyncProgress] = useState(0);
+  const [lastSync, setLastSync] = useState<any>(null);
+  const [syncError, setSyncError] = useState("");
   const [refreshToken, setRefreshToken] = useState(0);
 
   useEffect(() => {
@@ -62,7 +64,8 @@ export default function App() {
       try {
         const data = await api<any>("sync/progress");
         const progress = data.running && data.vehicle_total ? Math.round((((data.chunk || 1) - 1) + data.vehicle_index / data.vehicle_total) / Math.max(1, data.chunks || 1) * 100) : data.phase === "done" ? 100 : 0;
-        setSyncing(Boolean(data.running)); setSyncProgress(progress);
+        setSyncing(Boolean(data.running)); setSyncProgress(progress); setLastSync(data.last || null);
+        if (data.error) setSyncError(String(data.error)); else if (!data.running) setSyncError("");
         if (data.running) timer = window.setTimeout(poll, 2500);
       } catch { setSyncing(false); }
     };
@@ -79,6 +82,16 @@ export default function App() {
     setLoginName(login); setLoggedIn(true);
   };
   const logout = async () => { await api("auth/logout", { method: "POST" }).catch(() => {}); setLoggedIn(false); };
+  const startSync = async () => {
+    const to = new Date(Date.now() + 3 * 3600e3), from = new Date(to); from.setUTCDate(from.getUTCDate() - 6);
+    setSyncError(""); setSyncing(true); setSyncProgress(0);
+    try {
+      await api("sync/all", { method: "POST", body: JSON.stringify({ date_from: from.toISOString().slice(0, 10), date_to: to.toISOString().slice(0, 10) }) });
+      setRefreshToken(value => value + 1);
+    } catch (error) {
+      setSyncing(false); setSyncError(error instanceof Error ? error.message : "Не удалось запустить синхронизацию");
+    }
+  };
 
   if (loggedIn === null) return <div className="h-screen grid place-items-center bg-[#F3F4F6] text-[#6B7280]">Загрузка системы…</div>;
   if (!loggedIn) return <LoginScreen onLogin={login} />;
@@ -88,7 +101,7 @@ export default function App() {
     <div className="flex h-screen overflow-hidden bg-[#F3F4F6]">
       <Sidebar current={route.screen} onNavigate={screen => navigate(screen)} collapsed={sidebarCollapsed} onToggle={() => setSidebarCollapsed(v => !v)} onLogout={logout} login={loginName} />
       <div className="flex flex-col flex-1 min-w-0 overflow-hidden">
-        <TopBar section={meta.title} subtitle={meta.subtitle} syncing={syncing} syncProgress={syncProgress} onSync={() => navigate("settings")} onRefresh={() => setRefreshToken(v => v + 1)} />
+        <TopBar section={meta.title} subtitle={meta.subtitle} syncing={syncing} syncProgress={syncProgress} lastSync={lastSync} syncError={syncError} onSync={startSync} onRefresh={() => setRefreshToken(v => v + 1)} />
         <main className="flex-1 overflow-hidden flex flex-col min-h-0">
           {route.screen === "vehicles" && <VehiclesScreen refreshToken={refreshToken} onViewAnalytics={vehicleId => navigate("analytics", { mode: "vehicle", value: vehicleId })} />}
           {route.screen === "employees" && <EmployeesScreen refreshToken={refreshToken} onViewAnalytics={employee => navigate("analytics", { mode: "person", value: employee })} />}

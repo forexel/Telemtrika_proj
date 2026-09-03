@@ -195,6 +195,18 @@ function normalizePlate(value) {
 }
 function normalizeText(value) { return String(value || "").toLowerCase().replace(/ё/g, "е").replace(/[^а-яa-z0-9]/g, ""); }
 function threeDigitCode(value) { return String(value || "").match(/\d{3}/)?.[0] || ""; }
+function identityCode(value) {
+  return [...String(value || "").matchAll(/\d{3,4}/g)].map(match => ({ value: match[0], index: match.index || 0 })).sort((a, b) => b.value.length - a.value.length || a.index - b.index)[0]?.value || "";
+}
+function modelFamily(value) {
+  const text = normalizeText(value);
+  const families = [["bobcat", /bobcat|бобкат/], ["kamaz", /kamaz|камаз/], ["sobol", /sobol|собол/], ["largus", /largus|ларгус/], ["mtz", /mtz|мтз/], ["hitachi", /hitachi|хитачи/], ["changan", /changan|чанган/], ["logan", /logan|логан/], ["niva", /niva|нива/], ["vesta", /vesta|веста/], ["granta", /granta|гранта/]];
+  return families.find(([, pattern]) => pattern.test(text))?.[0] || "";
+}
+function canonicalPlate(value) {
+  const normalized = normalizePlate(value);
+  return normalized.match(/\d{2}[АВЕКМНОРСТУХ]{2}\d{4}/)?.[0] || normalized.match(/[АВЕКМНОРСТУХ]\d{3}[АВЕКМНОРСТУХ]{2}\d{2,3}/)?.[0] || normalized;
+}
 function isoDate(value) { const match = String(value || "").match(/(\d{1,2})\.(\d{1,2})\.(\d{4})/); return match ? `${match[3]}-${match[2].padStart(2, "0")}-${match[1].padStart(2, "0")}` : ""; }
 function sheetId(url) { const match = String(url || "").match(/\/spreadsheets\/d\/([a-zA-Z0-9_-]+)/); if (!match) throw new Error("Не удалось определить ID Google-таблицы"); return match[1]; }
 function columnNumber(column) { return String(column || "").toUpperCase().split("").reduce((value, letter) => value * 26 + letter.charCodeAt(0) - 64, 0); }
@@ -228,6 +240,13 @@ function matchVehicle(plate, name, cars) {
   const normalized = normalizePlate(plate), code = threeDigitCode(plate);
   let candidates = cars.filter(car => { const params = car.params && typeof car.params === "object" ? car.params : {}; const state = normalizePlate(car.stateNumber || params.stateNum || ""), display = normalizePlate(`${car.displayableName || ""} ${car.name || ""}`); return normalized && (state === normalized || display.includes(normalized)); });
   if (!candidates.length && code) { const modelToken = normalizeText(name).replace(/газ\d+/g, ""); candidates = cars.filter(car => threeDigitCode(`${car.stateNumber || ""} ${car.displayableName || ""}`) === code && (!modelToken || normalizeText(`${car.displayableName || ""} ${car.name || ""}`).includes(modelToken.slice(0, 5)))); }
+  if (!candidates.length) {
+    const identity = identityCode(plate), family = modelFamily(`${name} ${plate}`);
+    if (identity) candidates = cars.filter(car => {
+      const text = `${car.stateNumber || ""} ${car.displayableName || ""} ${car.name || ""}`;
+      return identityCode(text) === identity && (!family || modelFamily(text) === family);
+    });
+  }
   if (candidates.length !== 1) return { status: candidates.length ? "ambiguous" : "not_found", car: null }; return { status: "matched", car: candidates[0] };
 }
 function listVehicles(includeInactive = false) { return db.prepare(`SELECT id,name,plate,source,source_row,manual_override,active,match_status,glonass_name,updated_at FROM vehicles ${includeInactive ? "" : "WHERE active=1"} ORDER BY active DESC,name COLLATE NOCASE,plate`).all(); }
@@ -262,28 +281,36 @@ async function syncGoogle() {
       return { sourceUrl, sourceIndex, vehicleRows, assignmentRows, employeeRows };
     }));
     const now = new Date().toISOString();
-    const upsertVehicle = db.prepare(`INSERT INTO vehicles(name,plate,normalized_plate,source,source_row,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(normalized_plate) DO UPDATE SET name=CASE WHEN vehicles.manual_override=1 THEN vehicles.name ELSE excluded.name END,plate=CASE WHEN vehicles.manual_override=1 THEN vehicles.plate ELSE excluded.plate END,source_row=excluded.source_row,updated_at=excluded.updated_at`);
+    const parsed = sources.flatMap(source => source.assignmentRows.slice(1).map((row, index) => ({ work_date: isoDate(row[0]), work_object: String(row[1] || "").trim(), employee_name: String(row[2] || "").trim(), work_type: String(row[3] || "").trim(), vehicle_label: String(row[4] || "").trim(), note: String(row[5] || "").trim(), source_row: source.sourceIndex * 100000 + index + 2 }))).filter(row => row.work_date && row.work_object && row.employee_name);
+    const importedDates = [...new Set(parsed.map(row => row.work_date))];
+    const upsertVehicle = db.prepare(`INSERT INTO vehicles(name,plate,normalized_plate,source,source_row,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(normalized_plate) DO UPDATE SET name=CASE WHEN vehicles.manual_override=1 THEN vehicles.name ELSE excluded.name END,plate=CASE WHEN vehicles.manual_override=1 THEN vehicles.plate ELSE excluded.plate END,active=CASE WHEN vehicles.manual_override=1 THEN vehicles.active ELSE 1 END,source_row=excluded.source_row,updated_at=excluded.updated_at`);
     const upsertEmployee = db.prepare(`INSERT INTO employees(name,position,source_row,updated_at) VALUES(?,?,?,?) ON CONFLICT(name) DO UPDATE SET position=excluded.position,source_row=excluded.source_row,updated_at=excluded.updated_at`);
     db.exec("BEGIN");
     try {
       const modelIndex = modelNumber - first, plateIndex = plateNumber - first;
-      db.exec("DELETE FROM assignments WHERE source IN ('google','seed_glonass'); DELETE FROM employees;");
+      db.exec("DELETE FROM assignments WHERE source='seed_glonass'; DELETE FROM employees;");
+      if (importedDates.length) db.prepare(`DELETE FROM assignments WHERE source='google' AND work_date IN (${importedDates.map(() => "?").join(",")})`).run(...importedDates);
       for (const source of sources) {
         source.vehicleRows.forEach((row, index) => {
           const rowInSheet = index + 1, sourceRow = source.sourceIndex * 100000 + rowInSheet;
           const rawName = String(row[modelIndex] || "").trim(), rawPlate = String(row[plateIndex] || "").trim();
           const singleLabelColumn = modelNumber === plateNumber;
           const name = singleLabelColumn ? vehicleNameFromLabel(rawPlate) : rawName;
-          const plate = rawPlate;
+          const plate = singleLabelColumn ? canonicalPlate(rawPlate) : rawPlate;
           if (!normalizePlate(plate) || isVehicleHeader(plate) || (!singleLabelColumn && isVehicleHeader(name))) return;
-          const knownVehicles = db.prepare("SELECT id,name,plate FROM vehicles WHERE active=1").all();
-          if (singleLabelColumn && resolveVehicle(plate, knownVehicles)) return;
+          const knownVehicles = db.prepare("SELECT id,name,plate,active,manual_override FROM vehicles").all();
+          const knownId = singleLabelColumn ? resolveVehicle(rawPlate, knownVehicles) : null;
+          if (knownId) {
+            const known = knownVehicles.find(vehicle => vehicle.id === knownId);
+            if (known?.manual_override) return;
+            db.prepare("UPDATE vehicles SET name=?,plate=?,normalized_plate=?,source='google',active=1,source_row=?,updated_at=? WHERE id=?").run(name || "Автомобиль", plate, normalizePlate(plate), sourceRow, now, knownId);
+            return;
+          }
           upsertVehicle.run(name || "Автомобиль", plate, normalizePlate(plate), "google", sourceRow, now);
         });
         source.employeeRows.forEach((row, index) => { const name = String(row[1] || "").trim(), position = String(row[2] || "").trim(); if (name && position) upsertEmployee.run(name, position, source.sourceIndex * 100000 + index + 1, now); });
       }
       const vehicles = db.prepare("SELECT id,name,plate FROM vehicles WHERE active=1").all();
-      const parsed = sources.flatMap(source => source.assignmentRows.slice(1).map((row, index) => ({ work_date: isoDate(row[0]), work_object: String(row[1] || "").trim(), employee_name: String(row[2] || "").trim(), work_type: String(row[3] || "").trim(), vehicle_label: String(row[4] || "").trim(), note: String(row[5] || "").trim(), source_row: source.sourceIndex * 100000 + index + 2 }))).filter(row => row.work_date && row.work_object && row.employee_name);
       const grouped = new Map(); for (const row of parsed) { const key = `${row.work_date}|${row.work_object}`; if (!grouped.has(key)) grouped.set(key, []); grouped.get(key).push(row); }
       const insertAssignment = db.prepare("INSERT OR IGNORE INTO assignments(work_date,work_object,employee_name,work_type,vehicle_label,vehicle_id,note,source,source_row) VALUES(?,?,?,?,?,?,?,?,?)");
       for (const group of grouped.values()) {
@@ -300,9 +327,10 @@ async function syncGoogle() {
       }
       db.exec("COMMIT");
     } catch (error) { db.exec("ROLLBACK"); throw error; }
-    const glonass = await refreshVehicleMatches(settings);
-    const details = { sources: sourceUrls.length, vehicles: listVehicles().length, employees: db.prepare("SELECT COUNT(*) n FROM employees").get().n, assignments: db.prepare("SELECT COUNT(*) n FROM assignments WHERE source='google'").get().n, glonass_configured: glonass.configured, glonass_count: glonass.cars.length };
-    db.prepare("UPDATE sync_runs SET finished_at=?,status='ok',details=? WHERE id=?").run(new Date().toISOString(), JSON.stringify(details), run.lastInsertRowid); return details;
+    let glonass = { configured: false, cars: [] }, glonassError = null;
+    try { glonass = await refreshVehicleMatches(settings); } catch (error) { glonassError = error.message || "Не удалось обновить сопоставление ГЛОНАСС"; }
+    const details = { sources: sourceUrls.length, vehicles: listVehicles().length, employees: db.prepare("SELECT COUNT(*) n FROM employees").get().n, assignments: db.prepare("SELECT COUNT(*) n FROM assignments WHERE source='google'").get().n, glonass_configured: glonass.configured, glonass_count: glonass.cars.length, glonass_error: glonassError };
+    db.prepare("UPDATE sync_runs SET finished_at=?,status=?,details=? WHERE id=?").run(new Date().toISOString(), glonassError ? "partial" : "ok", JSON.stringify(details), run.lastInsertRowid); return details;
   } catch (error) { db.prepare("UPDATE sync_runs SET finished_at=?,status='error',details=? WHERE id=?").run(new Date().toISOString(), error.message, run.lastInsertRowid); throw error; }
 }
 
@@ -584,6 +612,41 @@ async function runFullSync(dateFrom, dateTo, source = "manual") {
   return syncPromise;
 }
 function startFullSync(dateFrom, dateTo, source = "manual") { if (syncState.running) return false; runFullSync(dateFrom, dateTo, source).catch(() => {}); return true; }
+async function runVehicleSync(vehicleId, dateFrom, dateTo, source = "manual") {
+  if (syncState.running) return syncPromise;
+  const vehicle = db.prepare("SELECT * FROM vehicles WHERE id=? AND active=1 AND match_status='matched'").get(vehicleId);
+  if (!vehicle) throw new Error("Автомобиль ещё не сопоставлен с ГЛОНАСС");
+  const totalChunks = Math.ceil((new Date(`${dateTo}T00:00:00Z`) - new Date(`${dateFrom}T00:00:00Z`) + 86400e3) / 86400e3 / 7);
+  Object.assign(syncState, { running: true, phase: "glonass", started_at: new Date().toISOString(), finished_at: null, date_from: dateFrom, date_to: dateTo, chunk: 0, chunks: totalChunks, vehicle: `${vehicle.name} ${vehicle.plate}`, vehicle_index: 0, vehicle_total: 1, result: null, error: null });
+  const run = db.prepare("INSERT INTO sync_runs(source,started_at,status,details) VALUES(?,?,?,?)").run(`vehicle_${source}`, syncState.started_at, "running", JSON.stringify({ vehicle_id: vehicleId, date_from: dateFrom, date_to: dateTo }));
+  syncPromise = (async () => {
+    try {
+      const settings = await loadSettings(), chunks = [];
+      let cursor = dateFrom, chunk = 0;
+      while (cursor <= dateTo) {
+        const end = addDays(cursor, 6) > dateTo ? dateTo : addDays(cursor, 6); chunk += 1;
+        Object.assign(syncState, { chunk, vehicle_index: 0, vehicle_total: 1 });
+        chunks.push(await syncGlonassFacts({ db, settings, dateFrom: cursor, dateTo: end, vehicleId, onProgress: progress => Object.assign(syncState, progress) }));
+        cursor = addDays(end, 1);
+      }
+      const result = { vehicle_id: vehicleId, chunks, days_saved: chunks.reduce((sum, item) => sum + item.days_saved, 0), segments_saved: chunks.reduce((sum, item) => sum + item.segments_saved, 0), errors: chunks.flatMap(item => item.errors || []) };
+      const status = result.errors.length ? "partial" : "ok";
+      Object.assign(syncState, { running: false, phase: "done", finished_at: new Date().toISOString(), result, error: result.errors.join("; ") || null });
+      db.prepare("UPDATE sync_runs SET finished_at=?,status=?,details=? WHERE id=?").run(syncState.finished_at, status, JSON.stringify(result), run.lastInsertRowid);
+      return result;
+    } catch (error) {
+      Object.assign(syncState, { running: false, phase: "error", finished_at: new Date().toISOString(), error: error.message });
+      db.prepare("UPDATE sync_runs SET finished_at=?,status='error',details=? WHERE id=?").run(syncState.finished_at, error.message, run.lastInsertRowid); throw error;
+    }
+  })();
+  syncPromise.catch(error => console.error("Vehicle sync failed", error));
+  return syncPromise;
+}
+function startVehicleSync(vehicleId, source = "manual") {
+  if (syncState.running) return false;
+  const to = todayMoscow(), firstAssignment = db.prepare("SELECT MIN(work_date) date FROM assignments WHERE vehicle_id=?").get(vehicleId)?.date;
+  runVehicleSync(vehicleId, firstAssignment || addDays(to, -6), to, source).catch(() => {}); return true;
+}
 function scheduleNightlySync() {
   const now = new Date(), next = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 23, 0)); if (next <= now) next.setUTCDate(next.getUTCDate() + 1);
   setTimeout(() => { const to = todayMoscow(); startFullSync(addDays(to, -6), to, "nightly"); scheduleNightlySync(); }, next - now);
@@ -628,21 +691,30 @@ async function handler(req, res) {
       const response = await fetch(loginUrl, { signal: AbortSignal.timeout(30000) }); if (!response.ok) throw new Error(`ГЛОНАСС HTTP ${response.status}`); const result = await response.json(); if (!result.user?.id) throw new Error("ГЛОНАСС не подтвердил пользователя"); return json(res, 200, { ok: true });
     }
     if (pathname === "/api/vehicles" && req.method === "GET") { if (!db.prepare("SELECT COUNT(*) n FROM vehicles").get().n) await syncGoogle(); const vehicles = listVehicles(url.searchParams.get("all") === "1"), matchedCount = db.prepare("SELECT COUNT(*) n FROM vehicles WHERE active=1 AND match_status='matched'").get().n; return json(res, 200, { vehicles, matched_count: matchedCount }); }
-    if (pathname === "/api/vehicles" && req.method === "POST") { const body = await readJson(req), name = String(body.name || "").trim(), plate = String(body.plate || "").trim(), normalized = normalizePlate(plate); if (!name || !normalized) return json(res, 400, { error: "Укажите название и госномер" }); const now = new Date().toISOString(); db.prepare(`INSERT INTO vehicles(name,plate,normalized_plate,source,manual_override,active,updated_at) VALUES(?,?,?,?,1,1,?) ON CONFLICT(normalized_plate) DO UPDATE SET name=excluded.name,plate=excluded.plate,source='manual',manual_override=1,active=1,updated_at=excluded.updated_at`).run(name, plate, normalized, "manual", now); const id = db.prepare("SELECT id FROM vehicles WHERE normalized_plate=?").get(normalized).id; await refreshVehicleMatches(await loadSettings(), [id]); return json(res, 201, { ok: true, vehicle: listVehicles(true).find(item => item.id === id) }); }
+    if (pathname === "/api/vehicles" && req.method === "POST") {
+      const body = await readJson(req), name = String(body.name || "").trim(), plate = canonicalPlate(body.plate), normalized = normalizePlate(plate);
+      if (!name || !normalized) return json(res, 400, { error: "Укажите название и госномер" });
+      const now = new Date().toISOString();
+      db.prepare(`INSERT INTO vehicles(name,plate,normalized_plate,source,manual_override,active,updated_at) VALUES(?,?,?,?,1,1,?) ON CONFLICT(normalized_plate) DO UPDATE SET name=excluded.name,plate=excluded.plate,source='manual',manual_override=1,active=1,updated_at=excluded.updated_at`).run(name, plate, normalized, "manual", now);
+      const id = db.prepare("SELECT id FROM vehicles WHERE normalized_plate=?").get(normalized).id;
+      await refreshVehicleMatches(await loadSettings(), [id]);
+      const syncStarted = db.prepare("SELECT match_status FROM vehicles WHERE id=?").get(id)?.match_status === "matched" ? startVehicleSync(id, "added") : false;
+      return json(res, 201, { ok: true, sync_started: syncStarted, vehicle: listVehicles(true).find(item => item.id === id) });
+    }
     const vehicleMatch = pathname.match(/^\/api\/vehicles\/(\d+)$/);
     const vehicleCheckMatch = pathname.match(/^\/api\/vehicles\/(\d+)\/check$/);
-    if (vehicleCheckMatch && req.method === "POST") { const id = Number(vehicleCheckMatch[1]); if (!db.prepare("SELECT id FROM vehicles WHERE id=?").get(id)) return json(res,404,{error:"Автомобиль не найден"}); await refreshVehicleMatches(await loadSettings(), [id]); return json(res,200,{ok:true,vehicle:listVehicles(true).find(item=>item.id===id)}); }
-    if (vehicleMatch && req.method === "PUT") { const id = Number(vehicleMatch[1]), body = await readJson(req), name = String(body.name || "").trim(), plate = String(body.plate || "").trim(), normalized = normalizePlate(plate), current = db.prepare("SELECT * FROM vehicles WHERE id=?").get(id); if (!current) return json(res, 404, { error: "Автомобиль не найден" }); if (!name || !normalized) return json(res, 400, { error: "Укажите название и госномер" }); const duplicate = db.prepare("SELECT id FROM vehicles WHERE normalized_plate=? AND id!=?").get(normalized,id); if (duplicate) return json(res, 409, { error: "Автомобиль с таким госномером уже существует" }); db.prepare("UPDATE vehicles SET name=?,plate=?,normalized_plate=?,source='manual',manual_override=1,active=1,match_status='not_checked',updated_at=? WHERE id=?").run(name,plate,normalized,new Date().toISOString(),id); await refreshVehicleMatches(await loadSettings(), [id]); return json(res, 200, { ok: true, vehicle: listVehicles(true).find(item => item.id === id) }); }
+    if (vehicleCheckMatch && req.method === "POST") { const id = Number(vehicleCheckMatch[1]); if (!db.prepare("SELECT id FROM vehicles WHERE id=?").get(id)) return json(res,404,{error:"Автомобиль не найден"}); await refreshVehicleMatches(await loadSettings(), [id]); const syncStarted = db.prepare("SELECT match_status FROM vehicles WHERE id=?").get(id)?.match_status === "matched" ? startVehicleSync(id, "checked") : false; return json(res,200,{ok:true,sync_started:syncStarted,vehicle:listVehicles(true).find(item=>item.id===id)}); }
+    if (vehicleMatch && req.method === "PUT") { const id = Number(vehicleMatch[1]), body = await readJson(req), name = String(body.name || "").trim(), plate = canonicalPlate(body.plate), normalized = normalizePlate(plate), current = db.prepare("SELECT * FROM vehicles WHERE id=?").get(id); if (!current) return json(res, 404, { error: "Автомобиль не найден" }); if (!name || !normalized) return json(res, 400, { error: "Укажите название и госномер" }); const duplicate = db.prepare("SELECT id FROM vehicles WHERE normalized_plate=? AND id!=?").get(normalized,id); if (duplicate) return json(res, 409, { error: "Автомобиль с таким госномером уже существует" }); db.prepare("UPDATE vehicles SET name=?,plate=?,normalized_plate=?,source='manual',manual_override=1,active=1,match_status='not_checked',updated_at=? WHERE id=?").run(name,plate,normalized,new Date().toISOString(),id); await refreshVehicleMatches(await loadSettings(), [id]); const syncStarted = db.prepare("SELECT match_status FROM vehicles WHERE id=?").get(id)?.match_status === "matched" ? startVehicleSync(id, "edited") : false; return json(res, 200, { ok: true, sync_started: syncStarted, vehicle: listVehicles(true).find(item => item.id === id) }); }
     if (vehicleMatch && req.method === "DELETE") { db.prepare("UPDATE vehicles SET active=0,updated_at=? WHERE id=?").run(new Date().toISOString(), Number(vehicleMatch[1])); return json(res, 200, { ok: true }); }
     if (pathname === "/api/sync/google" && req.method === "POST") return json(res, 200, { ok: true, ...(await syncGoogle()) });
     if (pathname === "/api/sync/glonass" && req.method === "POST") { const body = await readJson(req), settings = await loadSettings(); return json(res, 200, { ok: true, ...(await syncGlonassFacts({ db, settings, dateFrom: body.date_from, dateTo: body.date_to, vehicleId: Number(body.vehicle_id || 0) })) }); }
     if (pathname === "/api/sync/all" && req.method === "POST") { const body = await readJson(req), dateFrom = String(body.date_from || ""), dateTo = String(body.date_to || todayMoscow()); if (!/^\d{4}-\d{2}-\d{2}$/.test(dateFrom) || !/^\d{4}-\d{2}-\d{2}$/.test(dateTo) || dateFrom > dateTo) return json(res, 400, { error: "Проверьте период синхронизации" }); const started = startFullSync(dateFrom, dateTo, "manual"); return json(res, started ? 202 : 409, started ? { ok: true, started: true, state: syncState } : { error: "Синхронизация уже выполняется", state: syncState }); }
-    if (pathname === "/api/sync/progress" && req.method === "GET") return json(res, 200, { ...syncState, last: db.prepare("SELECT * FROM sync_runs WHERE source LIKE 'full_%' ORDER BY id DESC LIMIT 1").get() || null });
+    if (pathname === "/api/sync/progress" && req.method === "GET") return json(res, 200, { ...syncState, last: db.prepare("SELECT * FROM sync_runs WHERE source LIKE 'full_%' OR source LIKE 'vehicle_%' ORDER BY id DESC LIMIT 1").get() || null });
     if (pathname === "/api/reports/vehicles" && req.method === "GET") return json(res, 200, vehicleReport(url));
     if (pathname === "/api/reports/vehicle-segments" && req.method === "GET") return json(res, 200, vehicleSegments(url));
     if (pathname === "/api/reports/people" && req.method === "GET") return json(res, 200, peopleReport(url));
     if (pathname === "/api/reports/analytics" && req.method === "GET") return json(res, 200, analyticsReport(url));
-    if (pathname === "/api/sync/status" && req.method === "GET") return json(res, 200, { last: db.prepare("SELECT * FROM sync_runs WHERE source LIKE 'full_%' ORDER BY id DESC LIMIT 1").get() || null });
+    if (pathname === "/api/sync/status" && req.method === "GET") return json(res, 200, { last: db.prepare("SELECT * FROM sync_runs WHERE source LIKE 'full_%' OR source LIKE 'vehicle_%' ORDER BY id DESC LIMIT 1").get() || null });
     return serveStatic(req, res, pathname);
   } catch (error) { console.error(error); json(res, 500, { error: error.message || "Внутренняя ошибка" }); }
 }

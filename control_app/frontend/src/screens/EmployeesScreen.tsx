@@ -220,7 +220,7 @@ function EmployeeTableRow({ row, onViewAnalytics }: { row: EmployeeRow; onViewAn
         {row.mergedCount && <div className="text-[10px] text-[#9CA3AF] mt-0.5">Объединено назначений: {row.mergedCount}</div>}
       </td>
       <td className={td}>{row.position}</td>
-      <td className={td} data-no-export>
+      <td className={td}>
         <span className="block max-w-[160px] truncate" title={row.object}>{row.object}</span>
       </td>
       <td className={td}>
