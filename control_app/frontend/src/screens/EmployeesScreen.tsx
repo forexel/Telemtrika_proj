@@ -175,11 +175,11 @@ export default function EmployeesScreen({ onViewAnalytics, refreshToken }: Emplo
                   <th className={th} style={{ minWidth: 180 }}>Бригада</th>
                   <th className={th} style={{ minWidth: 90 }}>Начало дня</th>
                   <th className={th} style={{ minWidth: 110 }}>Выезд с базы</th>
-                  <th className={th} style={{ minWidth: 140 }}>Прибытие на объект 1</th>
-                  <th className={th} style={{ minWidth: 120 }}>Путь на объект 1</th>
+                  <th className={th} style={{ minWidth: 140 }}>Прибытие на объект</th>
+                  <th className={th} style={{ minWidth: 120 }}>Путь на объект</th>
                   <th className={th} style={{ minWidth: 160 }}>Остановки по пути на объект</th>
                   <th className={th} style={{ minWidth: 150 }}>Оценка пути на объект</th>
-                  <th className={th} style={{ minWidth: 140 }}>Выезд с объекта 1</th>
+                  <th className={th} style={{ minWidth: 140 }}>Выезд с объекта</th>
                   <th className={th} style={{ minWidth: 120 }}>Возврат на базу</th>
                   <th className={th} style={{ minWidth: 110 }}>Путь на базу</th>
                   <th className={th} style={{ minWidth: 170 }}>Остановки по пути на базу</th>

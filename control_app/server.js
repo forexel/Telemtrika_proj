@@ -195,8 +195,8 @@ function normalizePlate(value) {
 }
 function normalizeText(value) { return String(value || "").toLowerCase().replace(/ё/g, "е").replace(/[^а-яa-z0-9]/g, ""); }
 function threeDigitCode(value) { return String(value || "").match(/\d{3}/)?.[0] || ""; }
-function identityCode(value) {
-  return [...String(value || "").matchAll(/\d{3,4}/g)].map(match => ({ value: match[0], index: match.index || 0 })).sort((a, b) => b.value.length - a.value.length || a.index - b.index)[0]?.value || "";
+function identityCodes(value) {
+  return new Set([...String(value || "").matchAll(/\d{3,4}/g)].map(match => match[0]));
 }
 function modelFamily(value) {
   const text = normalizeText(value);
@@ -241,10 +241,10 @@ function matchVehicle(plate, name, cars) {
   let candidates = cars.filter(car => { const params = car.params && typeof car.params === "object" ? car.params : {}; const state = normalizePlate(car.stateNumber || params.stateNum || ""), display = normalizePlate(`${car.displayableName || ""} ${car.name || ""}`); return normalized && (state === normalized || display.includes(normalized)); });
   if (!candidates.length && code) { const modelToken = normalizeText(name).replace(/газ\d+/g, ""); candidates = cars.filter(car => threeDigitCode(`${car.stateNumber || ""} ${car.displayableName || ""}`) === code && (!modelToken || normalizeText(`${car.displayableName || ""} ${car.name || ""}`).includes(modelToken.slice(0, 5)))); }
   if (!candidates.length) {
-    const identity = identityCode(plate), family = modelFamily(`${name} ${plate}`);
-    if (identity) candidates = cars.filter(car => {
+    const identities = identityCodes(plate), family = modelFamily(`${name} ${plate}`);
+    if (identities.size) candidates = cars.filter(car => {
       const text = `${car.stateNumber || ""} ${car.displayableName || ""} ${car.name || ""}`;
-      return identityCode(text) === identity && (!family || modelFamily(text) === family);
+      return [...identityCodes(text)].some(code => identities.has(code)) && (!family || modelFamily(text) === family);
     });
   }
   if (candidates.length !== 1) return { status: candidates.length ? "ambiguous" : "not_found", car: null }; return { status: "matched", car: candidates[0] };
