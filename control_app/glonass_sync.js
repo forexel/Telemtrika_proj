@@ -34,12 +34,40 @@ function dominantSite(stops) {
   return { lat: chosen.center[0], lon: chosen.center[1], arrival: begin, departure: end, spanSeconds: Math.max(0, Math.round((end - begin) / 1000)) };
 }
 
-function analyzeDay(events) {
-  const moves = events.filter(event => event.typeName === "Движение"), stops = events.filter(event => ["Стоянка", "Стоянка. Двигатель запущен"].includes(event.typeName)), site = dominantSite(stops);
-  const departures = moves.filter(event => point(event) && point(event, true) && haversine(point(event), BASE) <= 0.8 && haversine(point(event, true), BASE) > 0.8);
-  const returns = moves.filter(event => point(event) && point(event, true) && haversine(point(event), BASE) > 2 && haversine(point(event, true), BASE) <= 0.8);
+export function movementEvents(events) {
+  const usable = events.filter(event => parseApiDate(event.dtBeg) && parseApiDate(event.dtEnd) && (Number(event.dtDelta || 0) > 0 || Number(event.distance || 0) > 0));
+  const exact = usable.filter(event => event.typeName === "Движение");
+  if (exact.length) return exact;
+  const trips = usable.filter(event => event.typeName === "Поездка");
+  if (trips.length) return trips;
+  const variants = usable.filter(event => String(event.typeName || "").startsWith("Движение."));
+  if (variants.length) return variants;
+  return usable.filter(event => event.typeName === "Вождение по тахографу");
+}
+
+export function clipEventToWindow(event, windowStart, windowEnd) {
+  const begin = parseApiDate(event.dtBeg), end = parseApiDate(event.dtEnd);
+  if (!begin || !end || end <= windowStart || begin >= windowEnd) return null;
+  const clippedBegin = begin < windowStart ? windowStart : begin;
+  const clippedEnd = end > windowEnd ? windowEnd : end;
+  const originalSeconds = Math.max(0, (end - begin) / 1000), clippedSeconds = Math.max(0, (clippedEnd - clippedBegin) / 1000);
+  const ratio = originalSeconds ? clippedSeconds / originalSeconds : 1;
+  return {
+    ...event,
+    dtBeg: { type: "datetime", v: apiDate(clippedBegin) },
+    dtEnd: { type: "datetime", v: apiDate(clippedEnd) },
+    dtDelta: clippedSeconds,
+    distance: Number(event.distance || 0) * ratio,
+  };
+}
+
+export function analyzeDay(events) {
+  const moves = movementEvents(events), stops = events.filter(event => ["Стоянка", "Стоянка. Двигатель запущен"].includes(event.typeName)), site = dominantSite(stops);
+  const departures = moves.filter(event => point(event) && point(event, true) && haversine(point(event), BASE) <= 0.8 && haversine(point(event, true), BASE) > 0.8 && (!site || parseApiDate(event.dtBeg) <= site.arrival));
+  const returns = moves.filter(event => point(event) && point(event, true) && haversine(point(event), BASE) > 2 && haversine(point(event, true), BASE) <= 0.8 && (!site || parseApiDate(event.dtEnd) >= site.departure));
   const departure = departures.map(event => parseApiDate(event.dtBeg)).filter(Boolean).sort((a, b) => a - b)[0] || null;
-  const returned = returns.map(event => parseApiDate(event.dtEnd)).filter(Boolean).sort((a, b) => b - a)[0] || null;
+  let returned = returns.map(event => parseApiDate(event.dtEnd)).filter(Boolean).sort((a, b) => b - a)[0] || null;
+  if (departure && returned && returned <= departure) returned = null;
   const outboundSeconds = departure && site ? Math.max(0, Math.round((site.arrival - departure) / 1000)) : null;
   const returnSeconds = returned && site ? Math.max(0, Math.round((returned - site.departure) / 1000)) : null;
   const overlap = (event, begin, end) => { const a = parseApiDate(event.dtBeg), b = parseApiDate(event.dtEnd); return !a || !b || !begin || !end ? 0 : Math.max(0, (Math.min(b, end) - Math.max(a, begin)) / 1000); };
@@ -81,7 +109,8 @@ export async function syncGlonassFacts({ db, settings, dateFrom, dateTo, vehicle
     const body = await response.json(), allEvents = body.recordLists?.events || [];
     for (let cursor = new Date(fromLocal); cursor < toLocalExclusive; cursor = new Date(cursor.getTime() + 86400e3)) {
       const day = moscowDate(cursor), assigned = db.prepare("SELECT GROUP_CONCAT(DISTINCT work_object) objects FROM assignments WHERE work_date=? AND vehicle_id=?").get(day, vehicle.id)?.objects || "";
-      const events = allEvents.filter(event => { const d = parseApiDate(event.dtBeg); return d && moscowDate(d) === day; }), fact = analyzeDay(events);
+      const dayEnd = new Date(cursor.getTime() + 86400e3);
+      const events = allEvents.map(event => clipEventToWindow(event, cursor, dayEnd)).filter(Boolean), fact = analyzeDay(events), selectedMoves = new Set(movementEvents(events));
       if (!assigned && fact.distance < 1) continue;
       const controls = unique([fact.speeding ? `Скорость выше 90 км/ч — ${fact.speeding}` : "", fact.gpsLoss ? `Потеря GPS — ${Math.round(fact.gpsLoss)} сек` : ""]).join("; ");
       const status = !assigned ? "unplanned" : fact.site ? "trip_confirmed" : fact.distance >= 5 ? "partial" : "not_confirmed";
@@ -91,7 +120,7 @@ export async function syncGlonassFacts({ db, settings, dateFrom, dateTo, vehicle
         upsert.run(day, vehicle.id, assigned, moscowIso(fact.departure), moscowIso(fact.site?.arrival), moscowIso(fact.site?.departure), moscowIso(fact.returned), fact.outboundSeconds, fact.outboundStops, fact.returnSeconds, fact.returnStops, fact.site?.spanSeconds || null, fact.departure && fact.returned ? Math.round((fact.returned - fact.departure) / 1000) : null, fact.distance, fact.maxSpeed, fact.speeding, fact.idle, fact.gpsLoss, fact.site?.lat || null, fact.site?.lon || null, status, controls, comment, "glonass", new Date().toISOString());
         deleteSegments.run(day, vehicle.id);
         for (const event of events) {
-          const eventType = event.typeName === "Движение" ? "movement" : event.typeName === "Стоянка" ? "stop" : event.typeName === "Стоянка. Двигатель запущен" ? "idle" : event.typeName === "Превышение скорости" ? "speeding" : event.typeName === "Потеря gps-спутников" ? "gps_loss" : "";
+          const eventType = selectedMoves.has(event) ? "movement" : event.typeName === "Стоянка" ? "stop" : event.typeName === "Стоянка. Двигатель запущен" ? "idle" : event.typeName === "Превышение скорости" ? "speeding" : event.typeName === "Потеря gps-спутников" ? "gps_loss" : "";
           if (!eventType) continue;
           const begin = parseApiDate(event.dtBeg), end = parseApiDate(event.dtEnd), start = point(event), finish = point(event, true), reference = start || finish;
           if (!begin || !end) continue;

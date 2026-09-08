@@ -98,30 +98,30 @@ export default function VehiclesScreen({ refreshToken, onViewAnalytics }: Props)
           <th className={th} style={{ minWidth: 180 }}>Контроль</th>
           <th className={th} style={{ minWidth: 360 }}>Комментарий</th>
           <th className={th} style={{ minWidth: 150 }} data-no-export>Действия</th>
-        </tr></thead><tbody>{rows.map((row: any) => { const key = `${row.work_date}|${row.vehicle_id}`, missing = !row.base_departure; return <React.Fragment key={key}><tr className={expanded === key ? "bg-[#F0F7FF]" : "hover:bg-[#F9FAFB]"}>
+        </tr></thead><tbody>{rows.map((row: any) => { const key = `${row.work_date}|${row.vehicle_id}`, hasPlan = Boolean(row.objects || row.work_object); return <React.Fragment key={key}><tr className={expanded === key ? "bg-[#F0F7FF]" : "hover:bg-[#F9FAFB]"}>
           <td className={`${td} sticky left-0 bg-white`}>{dateRu(row.work_date)}</td>
-          <td className={td}><span className="block max-w-[180px] whitespace-normal">{row.objects || row.work_object || "Без объекта"}</span></td>
-          <td className={td}><span className="block max-w-[160px] whitespace-normal">{row.work_types || "Вид работ не указан"}</span></td>
+          <td className={td}><span className="block max-w-[180px] whitespace-normal">{row.objects || row.work_object || "Нет разнарядки"}</span></td>
+          <td className={td}><span className="block max-w-[160px] whitespace-normal">{row.work_types || (hasPlan ? "Вид работ не указан" : "Нет разнарядки")}</span></td>
           <td className={td}><b>{row.vehicle_name}</b></td>
           <td className={td}>{row.vehicle_plate}</td>
-          <td className={td}>{row.driver || "Не указан"}</td>
-          <td className={td}>{row.masters || "Не указан"}</td>
-          <td className={td}><span className="block max-w-[200px] whitespace-normal">{row.crew || "Не указана"}</span></td>
+          <td className={td}>{row.driver || (hasPlan ? "Не указан" : "Нет разнарядки")}</td>
+          <td className={td}>{row.masters || (hasPlan ? "Не указан" : "Нет разнарядки")}</td>
+          <td className={td}><span className="block max-w-[200px] whitespace-normal">{row.crew || (hasPlan ? "Не указана" : "Нет разнарядки")}</span></td>
           <td className={td}>{row.workday_start || "08:00"}</td>
-          <td className={missing ? tdMuted : td}>{time(row.base_departure)}</td>
-          <td className={missing ? tdMuted : td}>{time(row.site_arrival)}</td>
-          <td className={missing ? tdMuted : td}>{duration(row.outbound_seconds)}</td>
-          <td className={missing ? tdMuted : td}>{duration(row.outbound_stops_seconds)}</td>
-          <td className={missing ? tdMuted : td}>{row.outbound_assessment || "—"}</td>
-          <td className={missing ? tdMuted : td}>{time(row.site_departure)}</td>
-          <td className={missing ? tdMuted : td}>{time(row.base_return)}</td>
-          <td className={missing ? tdMuted : td}>{duration(row.return_seconds)}</td>
-          <td className={missing ? tdMuted : td}>{duration(row.return_stops_seconds)}</td>
-          <td className={missing ? tdMuted : td}>{row.return_assessment || "—"}</td>
-          <td className={missing ? tdMuted : td}>{duration(row.work_seconds ?? row.site_seconds)}</td>
-          <td className={missing ? tdMuted : td}>{duration(row.workday_seconds)}</td>
+          <td className={row.base_departure ? td : tdMuted}>{time(row.base_departure)}</td>
+          <td className={row.site_arrival ? td : tdMuted}>{time(row.site_arrival)}</td>
+          <td className={row.outbound_seconds != null ? td : tdMuted}>{duration(row.outbound_seconds)}</td>
+          <td className={row.outbound_stops_seconds != null ? td : tdMuted}>{duration(row.outbound_stops_seconds)}</td>
+          <td className={row.outbound_assessment ? td : tdMuted}>{row.outbound_assessment || "—"}</td>
+          <td className={row.site_departure ? td : tdMuted}>{time(row.site_departure)}</td>
+          <td className={row.base_return ? td : tdMuted}>{time(row.base_return)}</td>
+          <td className={row.return_seconds != null ? td : tdMuted}>{duration(row.return_seconds)}</td>
+          <td className={row.return_stops_seconds != null ? td : tdMuted}>{duration(row.return_stops_seconds)}</td>
+          <td className={row.return_assessment ? td : tdMuted}>{row.return_assessment || "—"}</td>
+          <td className={(row.work_seconds ?? row.site_seconds) != null ? td : tdMuted}>{duration(row.work_seconds ?? row.site_seconds)}</td>
+          <td className={row.workday_seconds != null ? td : tdMuted}>{duration(row.workday_seconds)}</td>
           <td className={td}>{duration(row.overtime_seconds)}</td>
-          <td className={missing ? tdMuted : td}>{missing ? "—" : `${numberRu(row.distance_km)} км`}</td>
+          <td className={row.distance_km != null ? td : tdMuted}>{row.distance_km == null ? "—" : `${numberRu(row.distance_km)} км`}</td>
           <td className={td}><VehicleStatusBadge status={reportStatus(row.confirmation_status)} /></td>
           <td className={td}><span className={row.data_control ? "text-[#C43D32] whitespace-normal" : "text-[#2E7D32]"}>{row.data_control || "Без замечаний"}</span></td>
           <td className={td}><span className="block max-w-[340px] whitespace-normal leading-relaxed text-[#6B7280]">{row.report_comment || row.deviation_comment || "Отклонений не выявлено"}</span></td>
