@@ -617,6 +617,10 @@ function analyticsReport(url) {
 }
 function vehicleSegments(url) { const date = url.searchParams.get("date") || "", vehicleId = Number(url.searchParams.get("vehicle_id") || 0); if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !vehicleId) throw new Error("Укажите дату и автомобиль"); return { rows: db.prepare("SELECT * FROM effective_vehicle_segments WHERE work_date=? AND vehicle_id=? ORDER BY event_start").all(date, vehicleId) }; }
 
+// A named base needs one preceding day to recover a zone interval that started
+// before midnight. Six report days plus that lookback stay within the API's
+// seven-day calculator limit.
+const SYNC_CHUNK_DAYS = 6;
 const syncState = { running: false, phase: "idle", started_at: null, finished_at: null, date_from: null, date_to: null, chunk: 0, chunks: 0, vehicle: "", vehicle_index: 0, vehicle_total: 0, result: null, error: null };
 let syncPromise = null;
 function dateOnly(value) { return new Date(value).toISOString().slice(0,10); }
@@ -624,7 +628,7 @@ function addDays(value, days) { const date = new Date(`${value}T00:00:00Z`); dat
 function todayMoscow() { return dateOnly(new Date(Date.now() + 3 * 3600e3)); }
 async function runFullSync(dateFrom, dateTo, source = "manual") {
   if (syncState.running) return syncPromise;
-  Object.assign(syncState, { running: true, phase: "google", started_at: new Date().toISOString(), finished_at: null, date_from: dateFrom, date_to: dateTo, chunk: 0, chunks: Math.ceil((new Date(`${dateTo}T00:00:00Z`) - new Date(`${dateFrom}T00:00:00Z`) + 86400e3) / 86400e3 / 7), vehicle: "", vehicle_index: 0, vehicle_total: 0, result: null, error: null });
+  Object.assign(syncState, { running: true, phase: "google", started_at: new Date().toISOString(), finished_at: null, date_from: dateFrom, date_to: dateTo, chunk: 0, chunks: Math.ceil((new Date(`${dateTo}T00:00:00Z`) - new Date(`${dateFrom}T00:00:00Z`) + 86400e3) / 86400e3 / SYNC_CHUNK_DAYS), vehicle: "", vehicle_index: 0, vehicle_total: 0, result: null, error: null });
   const run = db.prepare("INSERT INTO sync_runs(source,started_at,status,details) VALUES(?,?,?,?)").run(`full_${source}`, syncState.started_at, "running", JSON.stringify({ date_from: dateFrom, date_to: dateTo }));
   syncPromise = (async () => {
     try {
@@ -633,12 +637,12 @@ async function runFullSync(dateFrom, dateTo, source = "manual") {
       ensureVehicleExceptions();
       if (source === "manual_full") {
         dateFrom = db.prepare("SELECT MIN(work_date) date FROM (SELECT work_date FROM assignments UNION ALL SELECT work_date FROM vehicle_days)").get()?.date || dateFrom;
-        Object.assign(syncState, { date_from: dateFrom, chunks: Math.ceil((new Date(`${dateTo}T00:00:00Z`) - new Date(`${dateFrom}T00:00:00Z`) + 86400e3) / 86400e3 / 7) });
+        Object.assign(syncState, { date_from: dateFrom, chunks: Math.ceil((new Date(`${dateTo}T00:00:00Z`) - new Date(`${dateFrom}T00:00:00Z`) + 86400e3) / 86400e3 / SYNC_CHUNK_DAYS) });
       }
       const settings = await loadSettings(), chunks = [];
       let cursor = dateFrom, chunk = 0;
       while (cursor <= dateTo) {
-        const end = addDays(cursor, 6) > dateTo ? dateTo : addDays(cursor, 6); chunk += 1;
+        const end = addDays(cursor, SYNC_CHUNK_DAYS - 1) > dateTo ? dateTo : addDays(cursor, SYNC_CHUNK_DAYS - 1); chunk += 1;
         Object.assign(syncState, { phase: "glonass", chunk, vehicle: "", vehicle_index: 0, vehicle_total: 0 });
         chunks.push(await syncGlonassFacts({ db, settings, dateFrom: cursor, dateTo: end, onProgress: progress => Object.assign(syncState, progress) }));
         cursor = addDays(end, 1);
@@ -661,7 +665,7 @@ async function runVehicleSync(vehicleId, dateFrom, dateTo, source = "manual") {
   if (syncState.running) return syncPromise;
   const vehicle = db.prepare("SELECT * FROM vehicles WHERE id=? AND active=1 AND match_status='matched'").get(vehicleId);
   if (!vehicle) throw new Error("Автомобиль ещё не сопоставлен с ГЛОНАСС");
-  const totalChunks = Math.ceil((new Date(`${dateTo}T00:00:00Z`) - new Date(`${dateFrom}T00:00:00Z`) + 86400e3) / 86400e3 / 7);
+  const totalChunks = Math.ceil((new Date(`${dateTo}T00:00:00Z`) - new Date(`${dateFrom}T00:00:00Z`) + 86400e3) / 86400e3 / SYNC_CHUNK_DAYS);
   Object.assign(syncState, { running: true, phase: "glonass", started_at: new Date().toISOString(), finished_at: null, date_from: dateFrom, date_to: dateTo, chunk: 0, chunks: totalChunks, vehicle: `${vehicle.name} ${vehicle.plate}`, vehicle_index: 0, vehicle_total: 1, result: null, error: null });
   const run = db.prepare("INSERT INTO sync_runs(source,started_at,status,details) VALUES(?,?,?,?)").run(`vehicle_${source}`, syncState.started_at, "running", JSON.stringify({ vehicle_id: vehicleId, date_from: dateFrom, date_to: dateTo }));
   syncPromise = (async () => {
@@ -669,7 +673,7 @@ async function runVehicleSync(vehicleId, dateFrom, dateTo, source = "manual") {
       const settings = await loadSettings(), chunks = [];
       let cursor = dateFrom, chunk = 0;
       while (cursor <= dateTo) {
-        const end = addDays(cursor, 6) > dateTo ? dateTo : addDays(cursor, 6); chunk += 1;
+        const end = addDays(cursor, SYNC_CHUNK_DAYS - 1) > dateTo ? dateTo : addDays(cursor, SYNC_CHUNK_DAYS - 1); chunk += 1;
         Object.assign(syncState, { chunk, vehicle_index: 0, vehicle_total: 1 });
         chunks.push(await syncGlonassFacts({ db, settings, dateFrom: cursor, dateTo: end, vehicleId, onProgress: progress => Object.assign(syncState, progress) }));
         cursor = addDays(end, 1);
