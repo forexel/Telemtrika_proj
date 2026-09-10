@@ -46,3 +46,32 @@ test("does not accept a return that happened before leaving", () => {
   assert.ok(analyzeDay(events).departure);
   assert.equal(analyzeDay(events).returned, null);
 });
+
+test('named base departure overrides the common base and ignores the earlier commute', () => {
+  const zone = (typeName, begin, end, name='Соболь 635') => ({...event(typeName,begin,end),objName:name});
+  const events = [
+    event('Поездка','07.09.2026 04:00:00','07.09.2026 05:00:00',20),
+    zone('Выход с объекта','07.09.2026 06:15:00','07.09.2026 06:15:00'),
+    event('Стоянка','07.09.2026 07:00:00','07.09.2026 13:00:00',0,[56.4,37.7],[56.4,37.7]),
+    zone('Вход на объект','07.09.2026 14:30:00','07.09.2026 16:00:00'),
+    zone('Выход с объекта','07.09.2026 03:00:00','07.09.2026 03:00:00','Другая база'),
+  ];
+  events[2].dtDelta=21600;
+  const result=analyzeDay(events,{baseName:'Соболь 635'});
+  assert.equal(result.departure.toISOString(),'2026-09-07T06:15:00.000Z');
+  assert.equal(result.returned.toISOString(),'2026-09-07T14:30:00.000Z');
+  assert.equal(result.outboundSeconds,45*60);
+  assert.equal(analyzeDay(events,{baseName:'Несуществующая база'}).departure,null);
+  assert.equal(analyzeDay(events,{baseName:'Несуществующая база'}).site,null);
+});
+
+test('base ID identifies the shared zone even after a name change', () => {
+  const events = [
+    {...event('Выход с объекта','10.09.2026 04:02:32','10.09.2026 04:02:32'),objID:25705,objName:'Новое название'},
+    {...event('Вход на объект','10.09.2026 13:30:28','10.09.2026 17:00:00'),objID:25705,objName:'Новое название'},
+    {...event('Выход с объекта','10.09.2026 02:00:00','10.09.2026 02:00:00'),objID:999,objName:'База соболь 635 и ларгус 817'},
+  ];
+  const result=analyzeDay(events,{baseName:'База соболь 635 и ларгус 817',baseId:25705});
+  assert.equal(result.departure.toISOString(),'2026-09-10T04:02:32.000Z');
+  assert.equal(result.returned.toISOString(),'2026-09-10T13:30:28.000Z');
+});

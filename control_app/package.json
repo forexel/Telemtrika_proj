@@ -5,6 +5,6 @@
   "scripts": {
     "start": "node --experimental-sqlite server.js",
     "check": "node --check server.js && node --check glonass_sync.js",
-    "test": "node --test glonass_sync.test.js"
+    "test": "node --test glonass_sync.test.js reports.test.js"
   }
 }

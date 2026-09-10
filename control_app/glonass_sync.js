@@ -18,11 +18,11 @@ function haversine(a, b) { const r = 6371.0088, rad = x => x * Math.PI / 180, dp
 function unique(values) { return [...new Set(values.filter(Boolean).map(value => String(value).trim()).filter(Boolean))]; }
 function addressText(value) { return typeof value === "object" ? String(value?.v || value?.name || "") : String(value || ""); }
 
-function dominantSite(stops) {
+function dominantSite(stops, isBase = event => point(event) && haversine(point(event), BASE) < 0.8) {
   const clusters = [];
   for (const event of stops) {
     const p = point(event), seconds = Number(event.dtDelta || 0);
-    if (!p || seconds < 300 || haversine(p, BASE) < 0.8) continue;
+    if (!p || seconds < 300 || isBase(event)) continue;
     let cluster = clusters.find(item => haversine(p, item.center) <= 1.5);
     if (!cluster) { cluster = { items: [], seconds: 0, latSum: 0, lonSum: 0, weight: 0, center: p }; clusters.push(cluster); }
     cluster.items.push(event); cluster.seconds += seconds; cluster.latSum += p[0] * seconds; cluster.lonSum += p[1] * seconds; cluster.weight += seconds; cluster.center = [cluster.latSum / cluster.weight, cluster.lonSum / cluster.weight];
@@ -61,13 +61,27 @@ export function clipEventToWindow(event, windowStart, windowEnd) {
   };
 }
 
-export function analyzeDay(events) {
-  const moves = movementEvents(events), stops = events.filter(event => ["Стоянка", "Стоянка. Двигатель запущен"].includes(event.typeName)), site = dominantSite(stops);
+function zoneName(event) { return String(event.objName || "").trim().toLocaleLowerCase("ru-RU"); }
+export function namedBaseEvents(events, baseName, baseId = null) {
+  const name = String(baseName || "").trim().toLocaleLowerCase("ru-RU");
+  return events.filter(event => baseId ? Number(event.objID) === Number(baseId) : name && zoneName(event) === name);
+}
+function atNamedBase(event, zones) {
+  const begin = parseApiDate(event.dtBeg), end = parseApiDate(event.dtEnd);
+  return zones.some(zone => zone.typeName === "Вход на объект" && begin >= parseApiDate(zone.dtBeg) && end <= parseApiDate(zone.dtEnd));
+}
+export function analyzeDay(events, { baseName = "", baseId = null } = {}) {
+  const zones = namedBaseEvents(events, baseName, baseId);
+  const customBase = Boolean(baseName || baseId);
+  const isBase = customBase ? event => atNamedBase(event, zones) : event => point(event) && haversine(point(event), BASE) <= 0.8;
+  const moves = movementEvents(events), stops = events.filter(event => ["Стоянка", "Стоянка. Двигатель запущен"].includes(event.typeName));
+  let site = dominantSite(stops, isBase);
   const departures = moves.filter(event => point(event) && point(event, true) && haversine(point(event), BASE) <= 0.8 && haversine(point(event, true), BASE) > 0.8 && (!site || parseApiDate(event.dtBeg) <= site.arrival));
   const returns = moves.filter(event => point(event) && point(event, true) && haversine(point(event), BASE) > 2 && haversine(point(event, true), BASE) <= 0.8 && (!site || parseApiDate(event.dtEnd) >= site.departure));
-  const departure = departures.map(event => parseApiDate(event.dtBeg)).filter(Boolean).sort((a, b) => a - b)[0] || null;
-  let returned = returns.map(event => parseApiDate(event.dtEnd)).filter(Boolean).sort((a, b) => b - a)[0] || null;
+  const departure = (customBase ? zones.filter(event => event.typeName === "Выход с объекта") : departures).map(event => parseApiDate(event.dtBeg)).filter(Boolean).sort((a, b) => a - b)[0] || null;
+  let returned = (customBase ? zones.filter(event => event.typeName === "Вход на объект" && (!departure || parseApiDate(event.dtBeg) > departure)) : returns).map(event => parseApiDate(customBase ? event.dtBeg : event.dtEnd)).filter(Boolean).sort((a, b) => b - a)[0] || null;
   if (departure && returned && returned <= departure) returned = null;
+  if (customBase) site = departure ? dominantSite(stops.map(event => clipEventToWindow(event, departure, returned || new Date(8640000000000000))).filter(Boolean), isBase) : null;
   const outboundSeconds = departure && site ? Math.max(0, Math.round((site.arrival - departure) / 1000)) : null;
   const returnSeconds = returned && site ? Math.max(0, Math.round((returned - site.departure) / 1000)) : null;
   const overlap = (event, begin, end) => { const a = parseApiDate(event.dtBeg), b = parseApiDate(event.dtEnd); return !a || !b || !begin || !end ? 0 : Math.max(0, (Math.min(b, end) - Math.max(a, begin)) / 1000); };
@@ -94,7 +108,7 @@ export async function syncGlonassFacts({ db, settings, dateFrom, dateTo, vehicle
   if (!loginResponse.ok) throw new Error(`Авторизация ГЛОНАСС: HTTP ${loginResponse.status}`);
   const login = await loginResponse.json(), userId = login.user?.id;
   if (!userId) throw new Error("ГЛОНАСС не вернул идентификатор пользователя");
-  const vehicles = db.prepare(`SELECT v.* FROM vehicles v WHERE v.active=1 AND v.match_status='matched' AND (?=0 OR v.id=?) ORDER BY v.id`).all(vehicleId, vehicleId);
+  const vehicles = db.prepare(`SELECT v.*,(SELECT base_name FROM vehicle_rules WHERE vehicle_id=v.id) base_name,(SELECT base_id FROM vehicle_rules WHERE vehicle_id=v.id) base_id FROM vehicles v WHERE v.active=1 AND v.match_status='matched' AND NOT EXISTS (SELECT 1 FROM vehicle_rules r WHERE r.vehicle_id=v.id AND r.source_vehicle_id IS NOT NULL) AND (?=0 OR v.id=COALESCE((SELECT source_vehicle_id FROM vehicle_rules WHERE vehicle_id=?),?)) ORDER BY v.id`).all(vehicleId, vehicleId, vehicleId);
   const upsert = db.prepare(`INSERT INTO vehicle_days(work_date,vehicle_id,work_object,base_departure,site_arrival,site_departure,base_return,outbound_seconds,outbound_stops_seconds,return_seconds,return_stops_seconds,site_seconds,shift_seconds,distance_km,max_speed_kmh,speeding_events,idle_engine_seconds,gps_loss_seconds,actual_lat,actual_lon,confirmation_status,data_control,deviation_comment,source,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(work_date,vehicle_id) DO UPDATE SET work_object=excluded.work_object,base_departure=excluded.base_departure,site_arrival=excluded.site_arrival,site_departure=excluded.site_departure,base_return=excluded.base_return,outbound_seconds=excluded.outbound_seconds,outbound_stops_seconds=excluded.outbound_stops_seconds,return_seconds=excluded.return_seconds,return_stops_seconds=excluded.return_stops_seconds,site_seconds=excluded.site_seconds,shift_seconds=excluded.shift_seconds,distance_km=excluded.distance_km,max_speed_kmh=excluded.max_speed_kmh,speeding_events=excluded.speeding_events,idle_engine_seconds=excluded.idle_engine_seconds,gps_loss_seconds=excluded.gps_loss_seconds,actual_lat=excluded.actual_lat,actual_lon=excluded.actual_lon,confirmation_status=excluded.confirmation_status,data_control=excluded.data_control,deviation_comment=excluded.deviation_comment,source='glonass',updated_at=excluded.updated_at`);
   const deleteSegments = db.prepare("DELETE FROM vehicle_segments WHERE work_date=? AND vehicle_id=?");
   const insertSegment = db.prepare(`INSERT INTO vehicle_segments(work_date,vehicle_id,event_type,event_start,event_end,duration_seconds,distance_km,max_speed_kmh,start_lat,start_lon,end_lat,end_lon,address_start,address_end,is_base,source) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'glonass')`);
@@ -104,13 +118,13 @@ export async function syncGlonassFacts({ db, settings, dateFrom, dateTo, vehicle
     if (onProgress) onProgress({ vehicle_index: vehicleIndex, vehicle_total: vehicles.length, vehicle: `${vehicle.name} ${vehicle.plate}` });
     const endpoint = new URL(`http://${vehicle.glonass_server}:2231/api/vm/calculator`);
     endpoint.searchParams.set("apikey", settings.glonass_api_key); endpoint.searchParams.set("user_id", userId); endpoint.searchParams.set("pwd_md5", crypto.createHash("md5").update(settings.glonass_password).digest("hex")); endpoint.searchParams.set("indented", "false");
-    const response = await fetch(endpoint, { method: "POST", headers: { "Content-Type": "application/json" }, signal: AbortSignal.timeout(120000), body: JSON.stringify({ unitID: Number(vehicle.glonass_unit_id), dtBeg: { type: "datetime", v: apiDate(fromLocal) }, dtEnd: { type: "datetime", v: apiDate(new Date(toLocalExclusive.getTime() - 1000)) }, keys: ["eventNoGPS", "eventObjInOut", "eventSpeedExcess", "eventTrip", "driver", "tachograph", "totalLastPoint"], inValues: { event_UseAddress: true, eventSpeedExcess_SpeedLimit: 90, eventTrip_MinStopTime: 300 } }) });
+    const response = await fetch(endpoint, { method: "POST", headers: { "Content-Type": "application/json" }, signal: AbortSignal.timeout(120000), body: JSON.stringify({ unitID: Number(vehicle.glonass_unit_id), dtBeg: { type: "datetime", v: apiDate(vehicle.base_id ? new Date(fromLocal.getTime() - 86400e3) : fromLocal) }, dtEnd: { type: "datetime", v: apiDate(new Date(toLocalExclusive.getTime() - 1000)) }, keys: ["eventNoGPS", "eventObjInOut", "eventSpeedExcess", "eventTrip", "driver", "tachograph", "totalLastPoint"], inValues: { event_UseAddress: true, eventSpeedExcess_SpeedLimit: 90, eventTrip_MinStopTime: 300, ...(vehicle.base_id ? { eventObjInOut_ObjIDs: [Number(vehicle.base_id)] } : {}) } }) });
     if (!response.ok) { errors.push(`${vehicle.name} ${vehicle.plate}: ГЛОНАСС HTTP ${response.status}`); continue; }
     const body = await response.json(), allEvents = body.recordLists?.events || [];
     for (let cursor = new Date(fromLocal); cursor < toLocalExclusive; cursor = new Date(cursor.getTime() + 86400e3)) {
       const day = moscowDate(cursor), assigned = db.prepare("SELECT GROUP_CONCAT(DISTINCT work_object) objects FROM assignments WHERE work_date=? AND vehicle_id=?").get(day, vehicle.id)?.objects || "";
       const dayEnd = new Date(cursor.getTime() + 86400e3);
-      const events = allEvents.map(event => clipEventToWindow(event, cursor, dayEnd)).filter(Boolean), fact = analyzeDay(events), selectedMoves = new Set(movementEvents(events));
+      const events = allEvents.map(event => clipEventToWindow(event, cursor, dayEnd)).filter(Boolean), fact = analyzeDay(events, { baseName: vehicle.base_name || "", baseId: vehicle.base_id }), selectedMoves = new Set(movementEvents(events));
       if (!assigned && fact.distance < 1) continue;
       const controls = unique([fact.speeding ? `Скорость выше 90 км/ч — ${fact.speeding}` : "", fact.gpsLoss ? `Потеря GPS — ${Math.round(fact.gpsLoss)} сек` : ""]).join("; ");
       const status = !assigned ? "unplanned" : fact.site ? "trip_confirmed" : fact.distance >= 5 ? "partial" : "not_confirmed";
@@ -118,13 +132,14 @@ export async function syncGlonassFacts({ db, settings, dateFrom, dateTo, vehicle
       db.exec("BEGIN");
       try {
         upsert.run(day, vehicle.id, assigned, moscowIso(fact.departure), moscowIso(fact.site?.arrival), moscowIso(fact.site?.departure), moscowIso(fact.returned), fact.outboundSeconds, fact.outboundStops, fact.returnSeconds, fact.returnStops, fact.site?.spanSeconds || null, fact.departure && fact.returned ? Math.round((fact.returned - fact.departure) / 1000) : null, fact.distance, fact.maxSpeed, fact.speeding, fact.idle, fact.gpsLoss, fact.site?.lat || null, fact.site?.lon || null, status, controls, comment, "glonass", new Date().toISOString());
+        db.prepare("UPDATE vehicle_days SET base_zone_name=?,base_zone_id=? WHERE work_date=? AND vehicle_id=?").run(vehicle.base_name || "", vehicle.base_id || null, day, vehicle.id);
         deleteSegments.run(day, vehicle.id);
         for (const event of events) {
           const eventType = selectedMoves.has(event) ? "movement" : event.typeName === "Стоянка" ? "stop" : event.typeName === "Стоянка. Двигатель запущен" ? "idle" : event.typeName === "Превышение скорости" ? "speeding" : event.typeName === "Потеря gps-спутников" ? "gps_loss" : "";
           if (!eventType) continue;
           const begin = parseApiDate(event.dtBeg), end = parseApiDate(event.dtEnd), start = point(event), finish = point(event, true), reference = start || finish;
           if (!begin || !end) continue;
-          insertSegment.run(day, vehicle.id, eventType, moscowIso(begin), moscowIso(end), Number(event.dtDelta || Math.max(0, (end - begin) / 1000)), Number(event.distance || 0), Number(event.maxSpeed || 0), start?.[0] ?? null, start?.[1] ?? null, finish?.[0] ?? null, finish?.[1] ?? null, addressText(event.addressBeg), addressText(event.addressEnd), reference && haversine(reference, BASE) <= 0.8 ? 1 : 0);
+          insertSegment.run(day, vehicle.id, eventType, moscowIso(begin), moscowIso(end), Number(event.dtDelta || Math.max(0, (end - begin) / 1000)), Number(event.distance || 0), Number(event.maxSpeed || 0), start?.[0] ?? null, start?.[1] ?? null, finish?.[0] ?? null, finish?.[1] ?? null, addressText(event.addressBeg), addressText(event.addressEnd), ((vehicle.base_name || vehicle.base_id) ? atNamedBase(event, namedBaseEvents(events, vehicle.base_name, vehicle.base_id)) : reference && haversine(reference, BASE) <= 0.8) ? 1 : 0);
           segmentsSaved += 1;
         }
         db.exec("COMMIT");

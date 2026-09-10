@@ -152,6 +152,29 @@ db.exec(`
   PRAGMA optimize;
 `);
 try { db.exec("ALTER TABLE vehicles ADD COLUMN manual_override INTEGER NOT NULL DEFAULT 0"); } catch {}
+db.exec(`CREATE TABLE IF NOT EXISTS vehicle_rules (
+  vehicle_id INTEGER PRIMARY KEY REFERENCES vehicles(id),
+  source_vehicle_id INTEGER REFERENCES vehicles(id),
+  departure_start INTEGER NOT NULL DEFAULT 0
+)`);
+const ruleColumns = db.prepare("PRAGMA table_info(vehicle_rules)").all();
+if (!ruleColumns.some(column => column.name === "base_name")) {
+  db.exec("ALTER TABLE vehicle_rules ADD COLUMN base_name TEXT NOT NULL DEFAULT ''");
+  db.prepare("UPDATE vehicle_rules SET base_name='Соболь 635' WHERE vehicle_id IN (SELECT id FROM vehicles WHERE normalized_plate=?)").run(normalizePlate("А635СО777"));
+}
+if (!ruleColumns.some(column => column.name === "base_id")) {
+  db.exec("ALTER TABLE vehicle_rules ADD COLUMN base_id INTEGER");
+  db.prepare("UPDATE vehicle_rules SET base_name='База соболь 635 и ларгус 817',base_id=25705 WHERE vehicle_id IN (SELECT id FROM vehicles WHERE normalized_plate IN (?,?)) AND (base_name='' OR base_name='Соболь 635')").run(normalizePlate("А635СО777"),normalizePlate("Т817НМ777"));
+}
+if (!db.prepare("PRAGMA table_info(vehicle_days)").all().some(column => column.name === "base_zone_name")) db.exec("ALTER TABLE vehicle_days ADD COLUMN base_zone_name TEXT NOT NULL DEFAULT ''");
+if (!db.prepare("PRAGMA table_info(vehicle_days)").all().some(column => column.name === "base_zone_id")) db.exec("ALTER TABLE vehicle_days ADD COLUMN base_zone_id INTEGER");
+// Resolve telemetry at read time so changing an exception also updates historical reports.
+for (const table of ["vehicle_days", "vehicle_segments"]) {
+  const columns = db.prepare(`PRAGMA table_info(${table})`).all().map(column => column.name);
+  const baseFields = new Set(["base_departure", "base_return", "outbound_seconds", "outbound_stops_seconds", "return_seconds", "return_stops_seconds", "shift_seconds"]);
+  const projection = columns.map(column => column === "vehicle_id" ? "v.id AS vehicle_id" : table === "vehicle_days" && baseFields.has(column) ? `CASE WHEN COALESCE(sr.base_name,r.base_name,'')=COALESCE(d.base_zone_name,'') AND COALESCE(sr.base_id,r.base_id,0)=COALESCE(d.base_zone_id,0) THEN d.${column} ELSE NULL END AS ${column}` : `d.${column}`).join(",");
+  db.exec(`CREATE TEMP VIEW effective_${table} AS SELECT ${projection} FROM vehicles v LEFT JOIN vehicle_rules r ON r.vehicle_id=v.id LEFT JOIN vehicle_rules sr ON sr.vehicle_id=r.source_vehicle_id JOIN ${table} d ON d.vehicle_id=COALESCE(r.source_vehicle_id,v.id)`);
+}
 db.exec(`UPDATE vehicle_days SET confirmation_status='unplanned',deviation_comment='Движение зафиксировано, но разнарядка на этот автомобиль не найдена.' WHERE source='glonass' AND distance_km>=1 AND NOT EXISTS (SELECT 1 FROM assignments a WHERE a.work_date=vehicle_days.work_date AND a.vehicle_id=vehicle_days.vehicle_id)`);
 
 async function ensureSettings() {
@@ -249,7 +272,13 @@ function matchVehicle(plate, name, cars) {
   }
   if (candidates.length !== 1) return { status: candidates.length ? "ambiguous" : "not_found", car: null }; return { status: "matched", car: candidates[0] };
 }
-function listVehicles(includeInactive = false) { return db.prepare(`SELECT id,name,plate,source,source_row,manual_override,active,match_status,glonass_name,updated_at FROM vehicles ${includeInactive ? "" : "WHERE active=1"} ORDER BY active DESC,name COLLATE NOCASE,plate`).all(); }
+function ensureVehicleExceptions() {
+  const source = db.prepare("SELECT id FROM vehicles WHERE normalized_plate=? AND active=1").get(normalizePlate("А635СО777"));
+  const target = db.prepare("SELECT id FROM vehicles WHERE normalized_plate=? AND active=1").get(normalizePlate("Т817НМ777"));
+  if (source) db.prepare("INSERT OR IGNORE INTO vehicle_rules(vehicle_id,departure_start,base_name,base_id) VALUES(?,1,'База соболь 635 и ларгус 817',25705)").run(source.id);
+  if (target) db.prepare("INSERT OR IGNORE INTO vehicle_rules(vehicle_id,source_vehicle_id,departure_start,base_name,base_id) VALUES(?,?,1,'База соболь 635 и ларгус 817',25705)").run(target.id,source?.id || null);
+}
+function listVehicles(includeInactive = false) { ensureVehicleExceptions(); return db.prepare(`SELECT id,name,plate,source,source_row,manual_override,active,match_status,glonass_name,glonass_unit_id,glonass_server,(SELECT source_vehicle_id FROM vehicle_rules WHERE vehicle_id=vehicles.id) source_vehicle_id,(SELECT departure_start FROM vehicle_rules WHERE vehicle_id=vehicles.id) departure_start,(SELECT base_name FROM vehicle_rules WHERE vehicle_id=vehicles.id) base_name,(SELECT base_id FROM vehicle_rules WHERE vehicle_id=vehicles.id) base_id,updated_at FROM vehicles ${includeInactive ? "" : "WHERE active=1"} ORDER BY active DESC,name COLLATE NOCASE,plate`).all(); }
 function resolveVehicle(label, vehicles = db.prepare("SELECT id,name,plate FROM vehicles WHERE active=1").all()) {
   const normalized = normalizePlate(label), exact = vehicles.filter(v => normalizePlate(v.plate) === normalized || normalizePlate(`${v.name} ${v.plate}`).includes(normalized));
   if (exact.length === 1) return exact[0].id; const code = threeDigitCode(label); if (!code) return null;
@@ -361,7 +390,7 @@ function driverFromEntries(entries, vehicleId, activeVehicles) {
   return [...new Set(String(entries || "").split(",").map(entry => { const divider = entry.indexOf("|"); if (divider < 0) return ""; const name = entry.slice(0, divider), label = entry.slice(divider + 1); return resolveVehicle(label, activeVehicles) === vehicleId ? name : ""; }).filter(Boolean))].join(", ");
 }
 function segmentMap(from, to, vehicleId = 0) {
-  const result = new Map(), rows = db.prepare(`SELECT * FROM vehicle_segments WHERE work_date BETWEEN ? AND ? AND (?=0 OR vehicle_id=?) ORDER BY work_date,event_start`).all(from, to, vehicleId, vehicleId);
+  const result = new Map(), rows = db.prepare(`SELECT * FROM effective_vehicle_segments WHERE work_date BETWEEN ? AND ? AND (?=0 OR vehicle_id=?) ORDER BY work_date,event_start`).all(from, to, vehicleId, vehicleId);
   for (const row of rows) { const key = `${row.work_date}|${row.vehicle_id}`; if (!result.has(key)) result.set(key, []); result.get(key).push(row); }
   return result;
 }
@@ -385,13 +414,15 @@ function roadAssessment(hasFact, confirmationStatus, travel, stops) {
   return "Без заметных задержек";
 }
 function workdayMetrics(row) {
-  const startOfDay = new Date(`${row.work_date}T08:00:00+03:00`);
+  const rule = db.prepare("SELECT COALESCE(source.departure_start,r.departure_start,0) departure_start FROM vehicle_rules r LEFT JOIN vehicle_rules source ON source.vehicle_id=r.source_vehicle_id WHERE r.vehicle_id=?").get(row.vehicle_id);
+  const startOfDay = rule?.departure_start ? (row.base_departure ? new Date(row.base_departure) : null) : new Date(`${row.work_date}T08:00:00+03:00`);
   const endOfNorm = new Date(`${row.work_date}T17:00:00+03:00`);
   const baseReturn = row.base_return ? new Date(row.base_return) : null;
   return {
+    startLabel: rule?.departure_start ? (row.base_departure?.slice(11,16) || "Не зафиксирован") : "08:00",
     baseReturn,
     endOfNorm,
-    workdaySeconds: baseReturn && !Number.isNaN(baseReturn.valueOf()) ? Math.max(0, Math.round((baseReturn - startOfDay) / 1000)) : null,
+    workdaySeconds: startOfDay && baseReturn && !Number.isNaN(baseReturn.valueOf()) ? Math.max(0, Math.round((baseReturn - startOfDay) / 1000)) : null,
     overtimeSeconds: baseReturn && !Number.isNaN(baseReturn.valueOf()) ? Math.max(0, Math.round((baseReturn - endOfNorm) / 1000)) : null,
   };
 }
@@ -399,6 +430,7 @@ function peopleList() {
   return db.prepare(`SELECT name FROM employees WHERE TRIM(name)!='' UNION SELECT employee_name name FROM assignments WHERE TRIM(employee_name)!='' ORDER BY name COLLATE NOCASE`).all().map(row => row.name);
 }
 function vehicleReport(url) {
+  ensureVehicleExceptions();
   const { from, to, vehicleId, activeOnly } = filters(url);
   const rawRows = db.prepare(`SELECT d.*,v.name vehicle_name,v.plate vehicle_plate,v.glonass_name,
     COALESCE(NULLIF((SELECT GROUP_CONCAT(DISTINCT a.work_object) FROM assignments a WHERE a.work_date=d.work_date AND a.vehicle_id=d.vehicle_id AND a.source='google'),''),(SELECT GROUP_CONCAT(DISTINCT a.work_object) FROM assignments a WHERE a.work_date=d.work_date AND a.vehicle_id=d.vehicle_id),d.work_object) objects,
@@ -409,17 +441,17 @@ function vehicleReport(url) {
     (SELECT GROUP_CONCAT(DISTINCT a.employee_name) FROM assignments a
       JOIN employees master ON master.name=a.employee_name
       WHERE a.work_date=d.work_date AND a.vehicle_id=d.vehicle_id AND a.source='google' AND (master.position LIKE '%Мастер%' OR master.position LIKE '%мастер%')) masters,
-    (SELECT COUNT(*) FROM vehicle_segments s WHERE s.work_date=d.work_date AND s.vehicle_id=d.vehicle_id AND s.event_type='movement') movement_segments,
-    (SELECT COUNT(*) FROM vehicle_segments s WHERE s.work_date=d.work_date AND s.vehicle_id=d.vehicle_id AND s.event_type IN ('movement','stop','idle')) segment_count,
-    (SELECT COUNT(*) FROM vehicle_segments s WHERE s.work_date=d.work_date AND s.vehicle_id=d.vehicle_id AND s.event_type IN ('stop','idle') AND s.is_base=0 AND s.duration_seconds>=300) work_stops
-    FROM vehicle_days d JOIN vehicles v ON v.id=d.vehicle_id
+    (SELECT COUNT(*) FROM effective_vehicle_segments s WHERE s.work_date=d.work_date AND s.vehicle_id=d.vehicle_id AND s.event_type='movement') movement_segments,
+    (SELECT COUNT(*) FROM effective_vehicle_segments s WHERE s.work_date=d.work_date AND s.vehicle_id=d.vehicle_id AND s.event_type IN ('movement','stop','idle')) segment_count,
+    (SELECT COUNT(*) FROM effective_vehicle_segments s WHERE s.work_date=d.work_date AND s.vehicle_id=d.vehicle_id AND s.event_type IN ('stop','idle') AND s.is_base=0 AND s.duration_seconds>=300) work_stops
+    FROM effective_vehicle_days d JOIN vehicles v ON v.id=d.vehicle_id
     WHERE d.work_date BETWEEN ? AND ?
       AND v.active=1
       AND (?=0 OR d.vehicle_id=?)
       AND (?=0 OR (
         COALESCE(d.distance_km,0)>0
         AND EXISTS (
-          SELECT 1 FROM vehicle_segments active_segment
+          SELECT 1 FROM effective_vehicle_segments active_segment
           WHERE active_segment.work_date=d.work_date
             AND active_segment.vehicle_id=d.vehicle_id
             AND active_segment.event_type='movement'
@@ -427,9 +459,16 @@ function vehicleReport(url) {
         )
       ))
     ORDER BY d.work_date DESC,v.name`).all(from, to, vehicleId, vehicleId, activeOnly ? 1 : 0);
-  const activeVehicles = db.prepare("SELECT id,name,plate FROM vehicles WHERE active=1").all(), segments = segmentMap(from, to, vehicleId);
-  const rows = rawRows.map(row => {
-    const { baseReturn, endOfNorm, workdaySeconds, overtimeSeconds } = workdayMetrics(row);
+  const activeVehicles = db.prepare("SELECT id,name,plate FROM vehicles WHERE active=1").all();
+  const search = (url.searchParams.get("search") || "").toLowerCase();
+  const filtered = rawRows.filter(row => `${row.vehicle_name} ${row.vehicle_plate} ${row.objects} ${row.crew} ${row.vehicle_entries}`.toLowerCase().includes(search));
+  const total = filtered.length, pageSize = Math.min(100, Math.max(1, Number(url.searchParams.get("page_size")) || 50));
+  const paginated = url.searchParams.has("page");
+  const page = Math.min(Math.max(1, Math.floor(Number(url.searchParams.get("page")) || 1)), Math.max(1, Math.ceil(total / pageSize)));
+  const selected = paginated ? filtered.slice((page - 1) * pageSize, page * pageSize) : filtered;
+  const workSegments = db.prepare("SELECT event_type,is_base,start_lat,start_lon,end_lat,end_lon,duration_seconds FROM effective_vehicle_segments WHERE work_date=? AND vehicle_id=? AND event_type IN ('stop','idle')");
+  const rows = selected.map(row => {
+    const { startLabel, baseReturn, endOfNorm, workdaySeconds, overtimeSeconds } = workdayMetrics(row);
     const comments = [row.deviation_comment].filter(Boolean);
     if (!row.base_departure) comments.push("Нет зафиксированного выезда с базы.");
     if (baseReturn && baseReturn < endOfNorm) comments.push("Возврат на базу раньше 17:00.");
@@ -437,8 +476,8 @@ function vehicleReport(url) {
     return {
       ...row,
       driver: driverFromEntries(row.vehicle_entries, row.vehicle_id, activeVehicles),
-      work_seconds: confirmedWorkSeconds(row, segments.get(`${row.work_date}|${row.vehicle_id}`) || []),
-      workday_start: "08:00",
+      work_seconds: confirmedWorkSeconds(row, workSegments.all(row.work_date, row.vehicle_id)),
+      workday_start: startLabel,
       workday_seconds: workdaySeconds,
       overtime_seconds: overtimeSeconds,
       outbound_assessment: roadAssessment(true, row.confirmation_status, row.outbound_seconds, row.outbound_stops_seconds),
@@ -446,9 +485,10 @@ function vehicleReport(url) {
       report_comment: [...new Set(comments)].join(" "),
     };
   });
-  return { rows, totals: { days: rows.length, vehicles: new Set(rows.map(r => r.vehicle_id)).size, distance_km: rows.reduce((s, r) => s + Number(r.distance_km || 0), 0), site_seconds: rows.reduce((s, r) => s + Number(r.site_seconds || 0), 0), issues: rows.filter(r => r.confirmation_status === "not_confirmed" || r.data_control).length }, vehicles: listVehicles().map(({ id, name, plate }) => ({ id, name, plate })) };
+  return { rows, pagination: { page, page_size: pageSize, total, pages: Math.ceil(total / pageSize) }, totals: { days: filtered.length, vehicles: new Set(filtered.map(r => r.vehicle_id)).size, distance_km: filtered.reduce((s, r) => s + Number(r.distance_km || 0), 0), site_seconds: filtered.reduce((s, r) => s + Number(r.site_seconds || 0), 0), issues: filtered.filter(r => r.confirmation_status === "not_confirmed" || r.data_control).length }, vehicles: listVehicles().map(({ id, name, plate }) => ({ id, name, plate })) };
 }
 function peopleReport(url) {
+  ensureVehicleExceptions();
   const { from, to, employees } = filters(url), employeeWhere = employees.length ? ` AND employee_name IN (${employees.map(() => "?").join(",")})` : "";
   const rows = db.prepare(`
     WITH object_rows AS (
@@ -512,12 +552,12 @@ function peopleReport(url) {
     FROM daily
     LEFT JOIN employees emp ON emp.name=daily.employee_name
     LEFT JOIN vehicles v ON v.id=daily.vehicle_id
-    LEFT JOIN vehicle_days d ON d.work_date=daily.work_date AND d.vehicle_id=daily.vehicle_id
+    LEFT JOIN effective_vehicle_days d ON d.work_date=daily.work_date AND d.vehicle_id=daily.vehicle_id
     ORDER BY daily.work_date DESC,daily.employee_name
   `).all(from, to, ...employees);
   const activeVehicles = db.prepare("SELECT id,name,plate FROM vehicles WHERE active=1").all(), segments = segmentMap(from, to);
   const enrichedRows = rows.map(row => {
-    const { baseReturn, endOfNorm, workdaySeconds, overtimeSeconds } = workdayMetrics(row);
+    const { startLabel, baseReturn, endOfNorm, workdaySeconds, overtimeSeconds } = workdayMetrics(row);
     const transitDifferenceSeconds = row.outbound_seconds != null && row.return_seconds != null ? Number(row.outbound_seconds) - Number(row.return_seconds) : null;
     const comments = [row.deviation_comment].filter(Boolean);
     if (!row.vehicle_id) comments.push("В разнарядке нельзя однозначно определить автомобиль.");
@@ -529,7 +569,7 @@ function peopleReport(url) {
       ...row,
       driver,
       work_seconds: confirmedWorkSeconds(row, segments.get(`${row.work_date}|${row.vehicle_id}`) || []),
-      workday_start: "08:00",
+      workday_start: startLabel,
       workday_seconds: workdaySeconds,
       overtime_seconds: overtimeSeconds,
       transit_difference_seconds: transitDifferenceSeconds,
@@ -575,7 +615,7 @@ function analyticsReport(url) {
     people: peopleList(),
   };
 }
-function vehicleSegments(url) { const date = url.searchParams.get("date") || "", vehicleId = Number(url.searchParams.get("vehicle_id") || 0); if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !vehicleId) throw new Error("Укажите дату и автомобиль"); return { rows: db.prepare("SELECT * FROM vehicle_segments WHERE work_date=? AND vehicle_id=? ORDER BY event_start").all(date, vehicleId) }; }
+function vehicleSegments(url) { const date = url.searchParams.get("date") || "", vehicleId = Number(url.searchParams.get("vehicle_id") || 0); if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !vehicleId) throw new Error("Укажите дату и автомобиль"); return { rows: db.prepare("SELECT * FROM effective_vehicle_segments WHERE work_date=? AND vehicle_id=? ORDER BY event_start").all(date, vehicleId) }; }
 
 const syncState = { running: false, phase: "idle", started_at: null, finished_at: null, date_from: null, date_to: null, chunk: 0, chunks: 0, vehicle: "", vehicle_index: 0, vehicle_total: 0, result: null, error: null };
 let syncPromise = null;
@@ -590,6 +630,11 @@ async function runFullSync(dateFrom, dateTo, source = "manual") {
     try {
       let google = null, google_error = null;
       try { google = await syncGoogle(); } catch (error) { google_error = error.message || "Не удалось обновить Google Sheets"; }
+      ensureVehicleExceptions();
+      if (source === "manual_full") {
+        dateFrom = db.prepare("SELECT MIN(work_date) date FROM (SELECT work_date FROM assignments UNION ALL SELECT work_date FROM vehicle_days)").get()?.date || dateFrom;
+        Object.assign(syncState, { date_from: dateFrom, chunks: Math.ceil((new Date(`${dateTo}T00:00:00Z`) - new Date(`${dateFrom}T00:00:00Z`) + 86400e3) / 86400e3 / 7) });
+      }
       const settings = await loadSettings(), chunks = [];
       let cursor = dateFrom, chunk = 0;
       while (cursor <= dateTo) {
@@ -701,6 +746,14 @@ async function handler(req, res) {
       const syncStarted = db.prepare("SELECT match_status FROM vehicles WHERE id=?").get(id)?.match_status === "matched" ? startVehicleSync(id, "added") : false;
       return json(res, 201, { ok: true, sync_started: syncStarted, vehicle: listVehicles(true).find(item => item.id === id) });
     }
+    const ruleMatch = pathname.match(/^\/api\/vehicles\/(\d+)\/rule$/);
+    if (ruleMatch && req.method === "PUT") {
+      const id = Number(ruleMatch[1]), body = await readJson(req), source = Number(body.source_vehicle_id) || null;
+      if (!db.prepare("SELECT id FROM vehicles WHERE id=? AND active=1").get(id)) return json(res,404,{error:"Автомобиль не найден"});
+      if (source && (source === id || !db.prepare("SELECT id FROM vehicles WHERE id=? AND active=1").get(source) || db.prepare("SELECT 1 FROM vehicle_rules WHERE vehicle_id=? AND source_vehicle_id IS NOT NULL OR source_vehicle_id=?").get(source,id))) return json(res,400,{error:"Источник должен быть отдельным активным автомобилем без цепочки исключений"});
+      db.prepare("INSERT INTO vehicle_rules(vehicle_id,source_vehicle_id,departure_start,base_name,base_id) VALUES(?,?,?,?,?) ON CONFLICT(vehicle_id) DO UPDATE SET source_vehicle_id=excluded.source_vehicle_id,departure_start=excluded.departure_start,base_name=excluded.base_name,base_id=excluded.base_id").run(id,source,body.departure_start ? 1 : 0,String(body.base_name ?? db.prepare("SELECT base_name FROM vehicle_rules WHERE vehicle_id=?").get(id)?.base_name ?? "").trim(),body.base_id === undefined ? db.prepare("SELECT base_id FROM vehicle_rules WHERE vehicle_id=?").get(id)?.base_id || null : Number(body.base_id) || null);
+      return json(res,200,{ok:true});
+    }
     const vehicleMatch = pathname.match(/^\/api\/vehicles\/(\d+)$/);
     const vehicleCheckMatch = pathname.match(/^\/api\/vehicles\/(\d+)\/check$/);
     if (vehicleCheckMatch && req.method === "POST") { const id = Number(vehicleCheckMatch[1]); if (!db.prepare("SELECT id FROM vehicles WHERE id=?").get(id)) return json(res,404,{error:"Автомобиль не найден"}); await refreshVehicleMatches(await loadSettings(), [id]); const syncStarted = db.prepare("SELECT match_status FROM vehicles WHERE id=?").get(id)?.match_status === "matched" ? startVehicleSync(id, "checked") : false; return json(res,200,{ok:true,sync_started:syncStarted,vehicle:listVehicles(true).find(item=>item.id===id)}); }
@@ -708,7 +761,7 @@ async function handler(req, res) {
     if (vehicleMatch && req.method === "DELETE") { db.prepare("UPDATE vehicles SET active=0,updated_at=? WHERE id=?").run(new Date().toISOString(), Number(vehicleMatch[1])); return json(res, 200, { ok: true }); }
     if (pathname === "/api/sync/google" && req.method === "POST") return json(res, 200, { ok: true, ...(await syncGoogle()) });
     if (pathname === "/api/sync/glonass" && req.method === "POST") { const body = await readJson(req), settings = await loadSettings(); return json(res, 200, { ok: true, ...(await syncGlonassFacts({ db, settings, dateFrom: body.date_from, dateTo: body.date_to, vehicleId: Number(body.vehicle_id || 0) })) }); }
-    if (pathname === "/api/sync/all" && req.method === "POST") { const body = await readJson(req), dateFrom = String(body.date_from || ""), dateTo = String(body.date_to || todayMoscow()); if (!/^\d{4}-\d{2}-\d{2}$/.test(dateFrom) || !/^\d{4}-\d{2}-\d{2}$/.test(dateTo) || dateFrom > dateTo) return json(res, 400, { error: "Проверьте период синхронизации" }); const started = startFullSync(dateFrom, dateTo, "manual"); return json(res, started ? 202 : 409, started ? { ok: true, started: true, state: syncState } : { error: "Синхронизация уже выполняется", state: syncState }); }
+    if (pathname === "/api/sync/all" && req.method === "POST") { const body = await readJson(req), dateTo = body.mode === "recent" || body.mode === "full" ? todayMoscow() : String(body.date_to || todayMoscow()), dateFrom = body.mode === "recent" ? addDays(dateTo,-2) : body.mode === "full" ? (db.prepare("SELECT MIN(work_date) date FROM (SELECT work_date FROM assignments UNION ALL SELECT work_date FROM vehicle_days)").get()?.date || addDays(dateTo,-6)) : String(body.date_from || ""); if (!/^\d{4}-\d{2}-\d{2}$/.test(dateFrom) || !/^\d{4}-\d{2}-\d{2}$/.test(dateTo) || dateFrom > dateTo) return json(res, 400, { error: "Проверьте период синхронизации" }); const started = startFullSync(dateFrom, dateTo, body.mode === "full" ? "manual_full" : "manual"); return json(res, started ? 202 : 409, started ? { ok: true, started: true, state: syncState } : { error: "Синхронизация уже выполняется", state: syncState }); }
     if (pathname === "/api/sync/progress" && req.method === "GET") return json(res, 200, { ...syncState, last: db.prepare("SELECT * FROM sync_runs WHERE source LIKE 'full_%' OR source LIKE 'vehicle_%' ORDER BY id DESC LIMIT 1").get() || null });
     if (pathname === "/api/reports/vehicles" && req.method === "GET") return json(res, 200, vehicleReport(url));
     if (pathname === "/api/reports/vehicle-segments" && req.method === "GET") return json(res, 200, vehicleSegments(url));
