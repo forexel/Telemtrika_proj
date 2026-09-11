@@ -11,8 +11,8 @@ interface EmployeesScreenProps {
 }
 
 const th = "text-left text-xs font-medium text-[#6B7280] bg-[#F9FAFB] px-3 py-2.5 whitespace-nowrap border-b border-[#E5E7EB]";
-const td = "px-3 py-3 text-xs text-[#1F2937] border-b border-[#E5E7EB] whitespace-nowrap align-top";
-const tdMuted = "px-3 py-3 text-xs text-[#9CA3AF] border-b border-[#E5E7EB] whitespace-nowrap align-top";
+const td = "px-3 py-3 text-xs text-[#1F2937] border-b border-[#E5E7EB] whitespace-nowrap align-middle";
+const tdMuted = "px-3 py-3 text-xs text-[#9CA3AF] border-b border-[#E5E7EB] whitespace-nowrap align-middle";
 
 function EmployeeMultiSelect({ selected, onChange, employees }: { selected: string[]; onChange: (v: string[]) => void; employees: string[] }) {
   const [open, setOpen] = useState(false);
@@ -191,7 +191,6 @@ export default function EmployeesScreen({ onViewAnalytics, refreshToken }: Emplo
                   <th className={th} style={{ minWidth: 160 }}>Подтверждение</th>
                   <th className={th} style={{ minWidth: 180 }}>Контроль</th>
                   <th className={th} style={{ minWidth: 360 }}>Комментарий</th>
-                  <th className={th} style={{ minWidth: 90 }} data-no-export>Действия</th>
                 </tr>
               </thead>
               <tbody>
@@ -213,7 +212,18 @@ function EmployeeTableRow({ row, onViewAnalytics }: { row: EmployeeRow; onViewAn
   const noVehicle = row.status === "no-vehicle";
 
   return (
-    <tr className="hover:bg-[#F9FAFB] transition-colors">
+    <tr
+      tabIndex={0}
+      aria-label={`Открыть аналитику сотрудника: ${row.employee}`}
+      onClick={onViewAnalytics}
+      onKeyDown={event => {
+        if (event.target === event.currentTarget && (event.key === "Enter" || event.key === " ")) {
+          event.preventDefault();
+          onViewAnalytics();
+        }
+      }}
+      className="cursor-pointer bg-white focus:outline focus:outline-2 focus:outline-[#2563A6]"
+    >
       <td className={`${td} sticky left-0 bg-white`} style={{ minWidth: 80 }}>{row.date}</td>
       <td className={`${td} sticky bg-white`} style={{ left: 80, minWidth: 140 }}>
         <div className="font-medium">{row.employee}</div>
@@ -264,11 +274,6 @@ function EmployeeTableRow({ row, onViewAnalytics }: { row: EmployeeRow; onViewAn
         {row.comment ? (
           <span className="text-[#6B7280] text-xs block max-w-[340px] whitespace-normal leading-relaxed">{row.comment}</span>
         ) : <span className="text-[#9CA3AF]">—</span>}
-      </td>
-      <td className={td}>
-        <button onClick={onViewAnalytics} className="text-xs text-[#2563A6] hover:underline">
-          Аналитика
-        </button>
       </td>
     </tr>
   );
