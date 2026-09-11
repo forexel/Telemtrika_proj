@@ -1,12 +1,64 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { api, query } from "../api";
-import { Button, Checkbox, DateInput, EmptyState, KpiCard, SearchInput, Select, Toast, VehicleStatusBadge, Spinner } from "../components/ui";
+import { Button, Checkbox, DateInput, EmptyState, KpiCard, SearchInput, Toast, VehicleStatusBadge, Spinner } from "../components/ui";
 import { dateRu, duration, exportTable, monthAgo, numberRu, reportStatus, time, today } from "../format";
 
 interface Props { refreshToken: number; onViewAnalytics: (vehicleId: string) => void; }
 const th = "text-left text-xs font-medium text-[#6B7280] bg-[#F9FAFB] px-3 py-2.5 whitespace-nowrap border-b border-[#E5E7EB]";
-const td = "px-3 py-3 text-xs text-[#1F2937] border-b border-[#E5E7EB] whitespace-nowrap align-top";
-const tdMuted = "px-3 py-3 text-xs text-[#9CA3AF] border-b border-[#E5E7EB] whitespace-nowrap align-top";
+const td = "px-3 py-3 text-xs text-[#1F2937] border-b border-[#E5E7EB] whitespace-nowrap align-middle";
+const tdMuted = "px-3 py-3 text-xs text-[#9CA3AF] border-b border-[#E5E7EB] whitespace-nowrap align-middle";
+
+function VehicleMultiSelect({ vehicles, value, onChange }: { vehicles: any[]; value: string[] | null; onChange: (value: string[] | null) => void }) {
+  const [open, setOpen] = useState(false);
+  const allIds = vehicles.map(vehicle => String(vehicle.id));
+  const checked = (id: string) => value === null || value.includes(id);
+  const label = value === null ? "Все автомобили" : value.length ? `Выбрано: ${value.length}` : "Ничего не выбрано";
+  const toggle = (id: string) => {
+    const current = value === null ? allIds : value;
+    const next = current.includes(id) ? current.filter(item => item !== id) : [...current, id];
+    onChange(next.length === allIds.length ? null : next);
+  };
+  return <div className="relative min-w-[260px]">
+    <label className="mb-1 block text-xs font-medium text-[#374151]">Автомобили</label>
+    <button type="button" onClick={() => setOpen(current => !current)} className="flex h-10 w-full items-center justify-between rounded-md border border-[#D1D5DB] bg-white px-3 text-left text-sm text-[#1F2937] focus:outline-none focus:ring-2 focus:ring-[#2563A6]">
+      <span className="truncate">{label}</span><span className="ml-3 text-[#6B7280]">⌄</span>
+    </button>
+    {open && <div className="absolute left-0 top-full z-40 mt-1 w-[320px] rounded-md border border-[#D1D5DB] bg-white shadow-lg">
+      <div className="flex gap-3 border-b border-[#E5E7EB] px-3 py-2 text-xs font-medium">
+        <button type="button" className="text-[#2563A6]" onClick={() => onChange(null)}>Выбрать все</button>
+        <button type="button" className="text-[#C43D32]" onClick={() => onChange([])}>Очистить все</button>
+      </div>
+      <div className="max-h-72 overflow-y-auto py-1">
+        {vehicles.map(vehicle => <label key={vehicle.id} className="flex cursor-pointer items-center gap-2 px-3 py-2 text-sm text-[#1F2937]">
+          <input type="checkbox" checked={checked(String(vehicle.id))} onChange={() => toggle(String(vehicle.id))} className="h-4 w-4 accent-[#2563A6]" />
+          <span className="truncate">{vehicle.name} · {vehicle.plate}</span>
+        </label>)}
+      </div>
+      <div className="border-t border-[#E5E7EB] p-2 text-right"><button type="button" onClick={() => setOpen(false)} className="rounded bg-[#2563A6] px-3 py-1.5 text-xs font-medium text-white">Готово</button></div>
+    </div>}
+  </div>;
+}
+
+function Pagination({ page, pages, loading, onPage }: { page: number; pages: number; loading: boolean; onPage: (page: number) => void }) {
+  const [target, setTarget] = useState(String(page));
+  useEffect(() => setTarget(String(page)), [page]);
+  const items = useMemo(() => {
+    const visible = new Set([1, 2, pages - 1, pages, page - 2, page - 1, page, page + 1, page + 2].filter(value => value >= 1 && value <= pages));
+    const sorted = [...visible].sort((a, b) => a - b), result: Array<number | string> = [];
+    sorted.forEach((value, index) => { if (index && value - sorted[index - 1] > 1) result.push(`gap-${value}`); result.push(value); });
+    return result;
+  }, [page, pages]);
+  const go = () => { const next = Math.min(pages, Math.max(1, Math.floor(Number(target) || 1))); setTarget(String(next)); onPage(next); };
+  return <div className="flex flex-wrap items-center justify-center gap-2 border-t border-[#E5E7EB] bg-white px-6 py-4">
+    <button type="button" disabled={loading || page <= 1} onClick={() => onPage(page - 1)} className="h-9 rounded-md border border-[#D1D5DB] px-3 text-sm disabled:opacity-40">← Назад</button>
+    {items.map(item => typeof item === "string" ? <span key={item} className="px-1 text-[#9CA3AF]">…</span> : <button type="button" key={item} disabled={loading} onClick={() => onPage(item)} className={`h-9 min-w-9 rounded-md border px-2 text-sm ${item === page ? "border-[#2563A6] bg-[#2563A6] font-medium text-white" : "border-[#D1D5DB] bg-white text-[#374151]"}`}>{item}</button>)}
+    <button type="button" disabled={loading || page >= pages} onClick={() => onPage(page + 1)} className="h-9 rounded-md border border-[#D1D5DB] px-3 text-sm disabled:opacity-40">Далее →</button>
+    <span className="ml-3 text-sm text-[#6B7280]">Перейти на</span>
+    <input aria-label="Номер страницы" type="number" min={1} max={pages} value={target} onChange={event => setTarget(event.target.value)} onKeyDown={event => { if (event.key === "Enter") go(); }} className="h-9 w-20 rounded-md border border-[#D1D5DB] px-2 text-center text-sm" />
+    <button type="button" disabled={loading} onClick={go} className="h-9 rounded-md border border-[#D1D5DB] px-3 text-sm font-medium">Перейти</button>
+    <span className="text-sm text-[#6B7280]">из {pages}</span>
+  </div>;
+}
 
 function kmDistance(a: any[], b: any[]) { if (a.some(v => v == null) || b.some(v => v == null)) return Infinity; const rad = (v: number) => v * Math.PI / 180, r = 6371.0088, dp = rad(b[0] - a[0]), dl = rad(b[1] - a[1]), h = Math.sin(dp / 2) ** 2 + Math.cos(rad(a[0])) * Math.cos(rad(b[0])) * Math.sin(dl / 2) ** 2; return 2 * r * Math.asin(Math.sqrt(h)); }
 function eventType(segment: any, row: any) { if (segment.event_type === "movement") return "drive"; if (segment.is_base) return "base"; const nearSite = kmDistance([segment.start_lat ?? segment.end_lat, segment.start_lon ?? segment.end_lon], [row.actual_lat, row.actual_lon]) <= 1.5; return nearSite ? "work" : segment.event_type === "idle" ? "idle" : "stop"; }
@@ -31,10 +83,10 @@ function TripTimeline({ row, loading, error }: { row: any; loading?: boolean; er
 export default function VehiclesScreen({ refreshToken, onViewAnalytics }: Props) {
   const [dateFrom, setDateFrom] = useState(monthAgo());
   const [dateTo, setDateTo] = useState(today());
-  const [vehicleId, setVehicleId] = useState("");
+  const [vehicleIds, setVehicleIds] = useState<string[] | null>(null);
   const [onlyActive, setOnlyActive] = useState(true);
   const [page, setPage] = useState(1);
-  const [applied, setApplied] = useState({ date_from: dateFrom, date_to: dateTo, vehicle_id: vehicleId, active_only: onlyActive });
+  const [applied, setApplied] = useState<{ date_from: string; date_to: string; vehicle_id: string[] | null; active_only: boolean }>({ date_from: dateFrom, date_to: dateTo, vehicle_id: null, active_only: onlyActive });
   const [search, setSearch] = useState("");
   const [data, setData] = useState<any>({ rows: [], totals: {}, vehicles: [] });
   const [loading, setLoading] = useState(true);
@@ -45,11 +97,35 @@ export default function VehiclesScreen({ refreshToken, onViewAnalytics }: Props)
   const [tripLoading, setTripLoading] = useState<string | null>(null);
   const [tripErrors, setTripErrors] = useState<Record<string, string>>({});
   const [toast, setToast] = useState<string | null>(null);
+  const pageCache = useRef(new Map<string, any[]>());
 
-  useEffect(() => { let cancelled = false; setLoading(true); setError("");
-    const timer = setTimeout(() => api<any>(`reports/vehicles?${query({ ...applied, page, page_size: 50, search })}`).then(result => { if (!cancelled) setData(result); }).catch(e => { if (!cancelled) setError(e.message); }).finally(() => { if (!cancelled) setLoading(false); }), 200);
+  useEffect(() => { let cancelled = false; setError("");
+    const filter: any = { ...applied, vehicle_none: applied.vehicle_id?.length === 0, page, page_size: 50, search };
+    const cacheKey = JSON.stringify(filter);
+    const cached = pageCache.current.get(cacheKey);
+    if (cached) setData((current: any) => ({ ...current, rows: cached }));
+    else setLoading(true);
+    const timer = setTimeout(() => {
+      const rowsRequest = api<any>(`reports/vehicles?${query({ ...filter, part: "rows" })}`).then(result => {
+        if (cancelled) return;
+        pageCache.current.set(cacheKey, result.rows || []);
+        setData((current: any) => ({ ...current, rows: result.rows || [], pagination: { ...current.pagination, page: result.pagination?.page || page, page_size: result.pagination?.page_size || 50 } }));
+      }).catch(e => { if (!cancelled) setError(e.message); }).finally(() => { if (!cancelled) setLoading(false); });
+      const summaryRequest = api<any>(`reports/vehicles?${query({ ...filter, part: "summary" })}`).then(result => {
+        if (cancelled) return;
+        setData((current: any) => ({ ...current, totals: result.totals || {}, vehicles: result.vehicles || [], pagination: result.pagination || current.pagination }));
+        const lastPage = Math.max(1, result.pagination?.pages || 1);
+        if (page > lastPage) setPage(lastPage);
+        else if (page < lastPage) {
+          const nextFilter = { ...filter, page: page + 1, part: "rows" }, nextKey = JSON.stringify({ ...filter, page: page + 1 });
+          if (!pageCache.current.has(nextKey)) api<any>(`reports/vehicles?${query(nextFilter)}`).then(next => pageCache.current.set(nextKey, next.rows || [])).catch(() => {});
+        }
+      }).catch(e => { if (!cancelled) setError(e.message); });
+      void Promise.allSettled([rowsRequest, summaryRequest]);
+    }, 200);
     return () => { cancelled = true; clearTimeout(timer); };
   }, [applied, page, search, requestKey, refreshToken]);
+  useEffect(() => { pageCache.current.clear(); }, [requestKey, refreshToken]);
   useEffect(() => { setTripSegments({}); setExpanded(null); }, [requestKey, refreshToken, applied]);
   const rows = data.rows;
   const toggle = async (row: any) => { const key = `${row.work_date}|${row.vehicle_id}`; if (expanded === key) return setExpanded(null); setExpanded(key); if (tripSegments[key]) return; setTripLoading(key); setTripErrors(current => ({...current,[key]:""})); try { const result = await api<any>(`reports/vehicle-segments?${query({ date: row.work_date, vehicle_id: row.vehicle_id })}`); setTripSegments(current => ({...current,[key]:result.rows || []})); } catch (e) { const message = e instanceof Error ? e.message : "Не удалось загрузить поездки"; setTripErrors(current => ({...current,[key]:message})); setToast(message); } finally { setTripLoading(null); } };
@@ -58,10 +134,10 @@ export default function VehiclesScreen({ refreshToken, onViewAnalytics }: Props)
     <div className="bg-white border-b border-[#E5E7EB] px-6 py-4"><div className="flex flex-wrap items-end gap-3">
       <DateInput label="С" value={dateFrom} onChange={e => setDateFrom(e.target.value)} />
       <DateInput label="По" value={dateTo} onChange={e => setDateTo(e.target.value)} />
-      <Select label="Автомобиль" value={vehicleId} onChange={e => setVehicleId(e.target.value)}><option value="">Все автомобили</option>{data.vehicles.map((v: any) => <option key={v.id} value={v.id}>{v.name} · {v.plate}</option>)}</Select>
+      <VehicleMultiSelect vehicles={data.vehicles} value={vehicleIds} onChange={setVehicleIds} />
       <div className="pb-0.5"><Checkbox label="Только активные" sublabel="Есть пробег и движение" checked={onlyActive} onChange={setOnlyActive} /></div>
-      <Button onClick={() => { setPage(1); setApplied({ date_from: dateFrom, date_to: dateTo, vehicle_id: vehicleId, active_only: onlyActive }); setRequestKey(v => v + 1); }}>Показать</Button>
-      <Button variant="secondary" onClick={() => { setDateFrom(monthAgo()); setDateTo(today()); setVehicleId(""); setOnlyActive(true); setSearch(""); setPage(1); setApplied({date_from:monthAgo(),date_to:today(),vehicle_id:"",active_only:true}); setRequestKey(v => v + 1); }}>Сбросить</Button>
+      <Button onClick={() => { setPage(1); setApplied({ date_from: dateFrom, date_to: dateTo, vehicle_id: vehicleIds, active_only: onlyActive }); setRequestKey(v => v + 1); }}>Применить фильтр</Button>
+      <Button variant="secondary" onClick={() => { setDateFrom(monthAgo()); setDateTo(today()); setVehicleIds(null); setOnlyActive(true); setSearch(""); setPage(1); setApplied({date_from:monthAgo(),date_to:today(),vehicle_id:null,active_only:true}); setRequestKey(v => v + 1); }}>Сбросить</Button>
     </div></div>
     <div className="bg-[#F3F4F6] px-6 py-4 border-b border-[#E5E7EB]"><div className="grid grid-cols-3 lg:grid-cols-6 gap-3">
       <KpiCard label="Активных автомобилей" value={data.totals.vehicles || 0} />
@@ -76,7 +152,7 @@ export default function VehiclesScreen({ refreshToken, onViewAnalytics }: Props)
       <div className="flex-1 overflow-auto scrollable">
         {loading ? <div className="py-20 flex justify-center text-[#6B7280]"><Spinner size={24} /></div> : error ? <EmptyState title="Не удалось загрузить отчёт" description={error} /> : !rows.length ? <EmptyState title="Ничего не найдено" description="Измените период или отключите фильтр активных автомобилей" /> :
         <table id="vehicles-table" className="w-full border-collapse" style={{ minWidth: 3650 }}><thead className="sticky top-0 z-10"><tr>
-          <th className={`${th} sticky left-0 z-20 bg-[#F9FAFB]`} style={{ minWidth: 80 }}>Дата</th>
+          <th className={`${th} sticky left-0 z-20 bg-[#F9FAFB]`} style={{ minWidth: 120 }}>Дата</th>
           <th className={th} style={{ minWidth: 200 }}>Объект</th>
           <th className={th} style={{ minWidth: 180 }}>Вид работ</th>
           <th className={th} style={{ minWidth: 150 }}>Автомобиль</th>
@@ -102,9 +178,8 @@ export default function VehiclesScreen({ refreshToken, onViewAnalytics }: Props)
           <th className={th} style={{ minWidth: 160 }}>Подтверждение</th>
           <th className={th} style={{ minWidth: 180 }}>Контроль</th>
           <th className={th} style={{ minWidth: 360 }}>Комментарий</th>
-          <th className={th} style={{ minWidth: 150 }} data-no-export>Действия</th>
-        </tr></thead><tbody>{rows.map((row: any) => { const key = `${row.work_date}|${row.vehicle_id}`, hasPlan = Boolean(row.objects || row.work_object); return <React.Fragment key={key}><tr tabIndex={0} aria-label={`Открыть статистику: ${row.vehicle_name} ${row.vehicle_plate}`} onClick={() => onViewAnalytics(String(row.vehicle_id))} onKeyDown={e => { if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); onViewAnalytics(String(row.vehicle_id)); } }} className={`cursor-pointer focus:outline focus:outline-2 focus:outline-[#2563A6] ${expanded === key ? "bg-[#F0F7FF]" : "hover:bg-[#F9FAFB]"}`}>
-          <td className={`${td} sticky left-0 bg-white`}><button type="button" aria-label={expanded === key ? "Скрыть поездки дня" : "Показать поездки дня"} aria-expanded={expanded === key} onClick={e => { e.stopPropagation(); toggle(row); }} className="mr-2 p-1 text-[#2563A6]">{expanded === key ? "▾" : "▸"}</button>{dateRu(row.work_date)}</td>
+        </tr></thead><tbody>{rows.map((row: any) => { const key = `${row.work_date}|${row.vehicle_id}`, hasPlan = Boolean(row.objects || row.work_object); return <React.Fragment key={key}><tr tabIndex={0} aria-label={`Открыть статистику: ${row.vehicle_name} ${row.vehicle_plate}`} onClick={() => onViewAnalytics(String(row.vehicle_id))} onKeyDown={e => { if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); onViewAnalytics(String(row.vehicle_id)); } }} className={`cursor-pointer focus:outline focus:outline-2 focus:outline-[#2563A6] ${expanded === key ? "bg-[#F0F7FF]" : "bg-white"}`}>
+          <td className={`${td} !p-0 sticky left-0 ${expanded === key ? "bg-[#F0F7FF]" : "bg-white"}`}><div className="flex min-h-[58px] items-stretch"><button type="button" aria-label={expanded === key ? "Скрыть поездки дня" : "Показать поездки дня"} aria-expanded={expanded === key} onClick={e => { e.stopPropagation(); toggle(row); }} className="flex w-12 shrink-0 items-center justify-center border-r border-[#E5E7EB] text-2xl font-bold text-[#2563A6]">{expanded === key ? "▾" : "▸"}</button><span className="flex items-center px-3">{dateRu(row.work_date)}</span></div></td>
           <td className={td}><span className="block max-w-[180px] whitespace-normal">{row.objects || row.work_object || "Нет разнарядки"}</span></td>
           <td className={td}><span className="block max-w-[160px] whitespace-normal">{row.work_types || (hasPlan ? "Вид работ не указан" : "Нет разнарядки")}</span></td>
           <td className={td}><b>{row.vehicle_name}</b></td>
@@ -130,11 +205,10 @@ export default function VehiclesScreen({ refreshToken, onViewAnalytics }: Props)
           <td className={td}><VehicleStatusBadge status={reportStatus(row.confirmation_status)} /></td>
           <td className={td}><span className={row.data_control ? "text-[#C43D32] whitespace-normal" : "text-[#2E7D32]"}>{row.data_control || "Без замечаний"}</span></td>
           <td className={td}><span className="block max-w-[340px] whitespace-normal leading-relaxed text-[#6B7280]">{row.report_comment || row.deviation_comment || "Отклонений не выявлено"}</span></td>
-          <td className={td} data-no-export><div className="flex flex-col items-start gap-1"><button onClick={e => { e.stopPropagation(); toggle(row); }} className="text-[#2563A6] hover:underline font-medium">{expanded === key ? "Скрыть поездки" : "Поездки дня"}</button><button onClick={e => { e.stopPropagation(); onViewAnalytics(String(row.vehicle_id)); }} className="text-[#2563A6] hover:underline">Аналитика</button><span className="text-[10px] text-[#9CA3AF]">Эпизодов: {row.segment_count || row.movement_segments || 0}</span></div></td>
-        </tr>{expanded === key && <tr data-no-export><td colSpan={27} className="p-0"><TripTimeline row={{...row,segments:tripSegments[key]}} loading={tripLoading===key} error={tripErrors[key]} /></td></tr>}</React.Fragment>; })}</tbody></table>}
+        </tr>{expanded === key && <tr data-no-export><td colSpan={26} className="p-0"><TripTimeline row={{...row,segments:tripSegments[key]}} loading={tripLoading===key} error={tripErrors[key]} /></td></tr>}</React.Fragment>; })}</tbody></table>}
+        {!loading && !error && <Pagination page={data.pagination?.page || page} pages={Math.max(1, data.pagination?.pages || 1)} loading={loading} onPage={setPage} />}
       </div>
     </div>
-    <div className="flex items-center justify-between border-t px-6 py-3 bg-white"><Button variant="secondary" disabled={loading || page <= 1} onClick={() => setPage(p => p - 1)}>Назад</Button><span className="text-sm">Страница {data.pagination?.page || 1} из {Math.max(1, data.pagination?.pages || 0)}</span><Button variant="secondary" disabled={loading || page >= (data.pagination?.pages || 1)} onClick={() => setPage(p => p + 1)}>Далее</Button></div>
     {toast && <Toast message={toast} type="success" onClose={() => setToast(null)} />}
   </div>;
 }

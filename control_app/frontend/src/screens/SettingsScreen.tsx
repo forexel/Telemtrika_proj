@@ -40,7 +40,7 @@ function GlonassSection({settings,onSave,onToast}:{settings:any;onSave:(p:any,m:
 
 function SheetsSection({settings,onSave,onToast,onSynced}:{settings:any;onSave:any;onToast:any;onSynced:()=>Promise<void>}) {
   const [form,setForm]=useState<any>({});const [testing,setTesting]=useState(false);const [result,setResult]=useState<any>(null);
-  useEffect(()=>setForm({google_sheet_urls:(settings.google_sheet_urls?.length?settings.google_sheet_urls:[settings.google_sheet_url].filter(Boolean)).join("\n"),assignments_sheet_name:settings.assignments_sheet_name||"Ввод",vehicle_sheet_name:settings.vehicle_sheet_name||"Справочник",vehicle_model_column:settings.vehicle_model_column||"J",vehicle_plate_column:settings.vehicle_plate_column||"K"}),[settings]);
+  useEffect(()=>setForm({google_sheet_urls:(settings.google_sheet_urls?.length?settings.google_sheet_urls:[settings.google_sheet_url].filter(Boolean)).join("\n"),assignments_sheet_name:settings.assignments_sheet_name||"Ввод",vehicle_sheet_name:settings.vehicle_sheet_name||"Справочник",vehicle_model_column:settings.vehicle_model_column||"E",vehicle_plate_column:settings.vehicle_plate_column||"E"}),[settings]);
   const field=(key:string)=>(e:React.ChangeEvent<HTMLInputElement>)=>setForm((f:any)=>({...f,[key]:e.target.value}));
   const payload=()=>({...form,google_sheet_urls:String(form.google_sheet_urls||"").split(/\r?\n/).map(value=>value.trim()).filter(Boolean)});
   const test=async()=>{setTesting(true);try{await onSave(payload(),"Настройки таблиц сохранены");const data=await api<any>("sync/google",{method:"POST",body:"{}"});setResult(data);await onSynced();}catch(e){onToast({message:e instanceof Error?e.message:"Ошибка таблицы",type:"error"});}finally{setTesting(false);}};

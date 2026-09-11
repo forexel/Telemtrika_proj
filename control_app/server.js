@@ -23,11 +23,11 @@ const sessionLifetimeSeconds = 12 * 60 * 60;
 const attempts = new Map();
 
 const defaults = {
-  google_sheet_url: "https://docs.google.com/spreadsheets/d/1hDfgy-ojCU1_q_Ip9fby0b8TKdIMR38A-N_9kaEMqsA/edit",
+  google_sheet_url: "https://docs.google.com/spreadsheets/d/11CjtJE1CxmlMol33efG7bYH6dU2KXG-jNJlEw_Z7Rs8/edit",
   google_sheet_urls: [],
   vehicle_sheet_name: "Справочник",
-  vehicle_model_column: "J",
-  vehicle_plate_column: "K",
+  vehicle_model_column: "E",
+  vehicle_plate_column: "E",
   assignments_sheet_name: "Ввод",
   glonass_login_url: "http://api.mssglonass.ru/api/vm/login.php",
   glonass_api_key: "",
@@ -235,7 +235,10 @@ function sheetId(url) { const match = String(url || "").match(/\/spreadsheets\/d
 function columnNumber(column) { return String(column || "").toUpperCase().split("").reduce((value, letter) => value * 26 + letter.charCodeAt(0) - 64, 0); }
 function toColumn(number) { let result = ""; while (number > 0) { number -= 1; result = String.fromCharCode(65 + number % 26) + result; number = Math.floor(number / 26); } return result; }
 function isVehicleHeader(value) { return ["автомобиль", "автомобили", "техника", "модель", "марка", "госномер", "номер"].includes(normalizeText(value)); }
-function vehicleNameFromLabel(value) { const label = String(value || "").trim(); return label.replace(/[\s_-]+\d{3,4}\s*$/u, "").trim() || label || "Автомобиль"; }
+function vehicleNameFromLabel(value) {
+  const label = String(value || "").trim();
+  return label.replace(/[\s_-]+(?:\d{2}[АВЕКМНОРСТУХABEKMHOPCTYX]{2}\d{4}|[АВЕКМНОРСТУХABEKMHOPCTYX]\d{3}[АВЕКМНОРСТУХABEKMHOPCTYX]{2}\d{2,3}|\d{3,4})\s*$/iu, "").trim() || label || "Автомобиль";
+}
 function parseCsv(text) {
   const rows = []; let row = [], value = "", quoted = false;
   for (let i = 0; i < text.length; i += 1) {
@@ -385,7 +388,18 @@ async function seedGlonassFacts() {
   } catch (error) { if (error.code !== "ENOENT") console.error("Seed import failed", error); }
 }
 
-function filters(url) { return { from: url.searchParams.get("date_from") || "1900-01-01", to: url.searchParams.get("date_to") || "2999-12-31", vehicleId: Number(url.searchParams.get("vehicle_id") || 0), activeOnly: url.searchParams.get("active_only") === "1", employees: url.searchParams.getAll("employee").filter(Boolean) }; }
+function filters(url) {
+  const vehicleIds = [...new Set(url.searchParams.getAll("vehicle_id").map(Number).filter(Number.isInteger).filter(id => id > 0))];
+  return {
+    from: url.searchParams.get("date_from") || "1900-01-01",
+    to: url.searchParams.get("date_to") || "2999-12-31",
+    vehicleId: vehicleIds[0] || 0,
+    vehicleIds,
+    noVehicles: url.searchParams.get("vehicle_none") === "1",
+    activeOnly: url.searchParams.get("active_only") === "1",
+    employees: url.searchParams.getAll("employee").filter(Boolean),
+  };
+}
 function driverFromEntries(entries, vehicleId, activeVehicles) {
   return [...new Set(String(entries || "").split(",").map(entry => { const divider = entry.indexOf("|"); if (divider < 0) return ""; const name = entry.slice(0, divider), label = entry.slice(divider + 1); return resolveVehicle(label, activeVehicles) === vehicleId ? name : ""; }).filter(Boolean))].join(", ");
 }
@@ -431,8 +445,58 @@ function peopleList() {
 }
 function vehicleReport(url) {
   ensureVehicleExceptions();
-  const { from, to, vehicleId, activeOnly } = filters(url);
-  const rawRows = db.prepare(`SELECT d.*,v.name vehicle_name,v.plate vehicle_plate,v.glonass_name,
+  const { from, to, vehicleIds, noVehicles, activeOnly } = filters(url);
+  const search = String(url.searchParams.get("search") || "").trim();
+  const where = ["d.work_date BETWEEN ? AND ?", "v.active=1"];
+  const whereParams = [from, to];
+  if (noVehicles) where.push("0=1");
+  else if (vehicleIds.length) {
+    where.push(`d.vehicle_id IN (${vehicleIds.map(() => "?").join(",")})`);
+    whereParams.push(...vehicleIds);
+  }
+  if (activeOnly) where.push(`COALESCE(d.distance_km,0)>0 AND EXISTS (
+    SELECT 1 FROM effective_vehicle_segments active_segment
+    WHERE active_segment.work_date=d.work_date
+      AND active_segment.vehicle_id=d.vehicle_id
+      AND active_segment.event_type='movement'
+      AND COALESCE(active_segment.distance_km,0)>0
+  )`);
+  if (search) {
+    const like = `%${search}%`;
+    where.push(`(
+      v.name LIKE ? COLLATE NOCASE OR v.plate LIKE ? COLLATE NOCASE OR
+      EXISTS (SELECT 1 FROM assignments search_assignment
+        WHERE search_assignment.work_date=d.work_date AND search_assignment.vehicle_id=d.vehicle_id
+          AND (search_assignment.work_object LIKE ? COLLATE NOCASE
+            OR search_assignment.employee_name LIKE ? COLLATE NOCASE
+            OR search_assignment.vehicle_label LIKE ? COLLATE NOCASE))
+    )`);
+    whereParams.push(like, like, like, like, like);
+  }
+  const whereSql = where.join(" AND ");
+  const part = url.searchParams.get("part") || "all";
+  const pageSize = Math.min(100, Math.max(1, Number(url.searchParams.get("page_size")) || 50));
+  const requestedPage = Math.max(1, Math.floor(Number(url.searchParams.get("page")) || 1));
+  const paginated = url.searchParams.has("page");
+  const summary = () => {
+    const row = db.prepare(`SELECT COUNT(*) days,COUNT(DISTINCT d.vehicle_id) vehicles,
+      COALESCE(SUM(d.distance_km),0) distance_km,COALESCE(SUM(d.site_seconds),0) site_seconds,
+      COALESCE(SUM(CASE WHEN d.confirmation_status='not_confirmed' OR TRIM(COALESCE(d.data_control,''))!='' THEN 1 ELSE 0 END),0) issues
+      FROM effective_vehicle_days d JOIN vehicles v ON v.id=d.vehicle_id WHERE ${whereSql}`).get(...whereParams);
+    return { ...row, days: Number(row.days || 0), vehicles: Number(row.vehicles || 0), issues: Number(row.issues || 0) };
+  };
+  if (part === "summary") {
+    const totals = summary(), total = totals.days, pages = Math.ceil(total / pageSize);
+    return { rows: [], pagination: { page: Math.min(requestedPage, Math.max(1, pages)), page_size: pageSize, total, pages }, totals, vehicles: listVehicles().map(({ id, name, plate }) => ({ id, name, plate })) };
+  }
+  let page = requestedPage, total = null, totals = {};
+  if (part === "all") {
+    totals = summary(); total = totals.days;
+    page = Math.min(requestedPage, Math.max(1, Math.ceil(total / pageSize)));
+  }
+  const limitSql = paginated ? " LIMIT ? OFFSET ?" : "";
+  const rowParams = [...whereParams, ...(paginated ? [pageSize, (page - 1) * pageSize] : [])];
+  const selected = db.prepare(`SELECT d.*,v.name vehicle_name,v.plate vehicle_plate,v.glonass_name,
     COALESCE(NULLIF((SELECT GROUP_CONCAT(DISTINCT a.work_object) FROM assignments a WHERE a.work_date=d.work_date AND a.vehicle_id=d.vehicle_id AND a.source='google'),''),(SELECT GROUP_CONCAT(DISTINCT a.work_object) FROM assignments a WHERE a.work_date=d.work_date AND a.vehicle_id=d.vehicle_id),d.work_object) objects,
     COALESCE(NULLIF((SELECT COUNT(DISTINCT a.work_object) FROM assignments a WHERE a.work_date=d.work_date AND a.vehicle_id=d.vehicle_id AND a.source='google'),0),(SELECT COUNT(DISTINCT a.work_object) FROM assignments a WHERE a.work_date=d.work_date AND a.vehicle_id=d.vehicle_id)) object_count,
     COALESCE(NULLIF((SELECT GROUP_CONCAT(DISTINCT a.employee_name) FROM assignments a WHERE a.work_date=d.work_date AND a.vehicle_id=d.vehicle_id AND a.source='google'),''),(SELECT GROUP_CONCAT(DISTINCT a.employee_name) FROM assignments a WHERE a.work_date=d.work_date AND a.vehicle_id=d.vehicle_id)) crew,
@@ -445,27 +509,9 @@ function vehicleReport(url) {
     (SELECT COUNT(*) FROM effective_vehicle_segments s WHERE s.work_date=d.work_date AND s.vehicle_id=d.vehicle_id AND s.event_type IN ('movement','stop','idle')) segment_count,
     (SELECT COUNT(*) FROM effective_vehicle_segments s WHERE s.work_date=d.work_date AND s.vehicle_id=d.vehicle_id AND s.event_type IN ('stop','idle') AND s.is_base=0 AND s.duration_seconds>=300) work_stops
     FROM effective_vehicle_days d JOIN vehicles v ON v.id=d.vehicle_id
-    WHERE d.work_date BETWEEN ? AND ?
-      AND v.active=1
-      AND (?=0 OR d.vehicle_id=?)
-      AND (?=0 OR (
-        COALESCE(d.distance_km,0)>0
-        AND EXISTS (
-          SELECT 1 FROM effective_vehicle_segments active_segment
-          WHERE active_segment.work_date=d.work_date
-            AND active_segment.vehicle_id=d.vehicle_id
-            AND active_segment.event_type='movement'
-            AND COALESCE(active_segment.distance_km,0)>0
-        )
-      ))
-    ORDER BY d.work_date DESC,v.name`).all(from, to, vehicleId, vehicleId, activeOnly ? 1 : 0);
+    WHERE ${whereSql}
+    ORDER BY d.work_date DESC,v.name${limitSql}`).all(...rowParams);
   const activeVehicles = db.prepare("SELECT id,name,plate FROM vehicles WHERE active=1").all();
-  const search = (url.searchParams.get("search") || "").toLowerCase();
-  const filtered = rawRows.filter(row => `${row.vehicle_name} ${row.vehicle_plate} ${row.objects} ${row.crew} ${row.vehicle_entries}`.toLowerCase().includes(search));
-  const total = filtered.length, pageSize = Math.min(100, Math.max(1, Number(url.searchParams.get("page_size")) || 50));
-  const paginated = url.searchParams.has("page");
-  const page = Math.min(Math.max(1, Math.floor(Number(url.searchParams.get("page")) || 1)), Math.max(1, Math.ceil(total / pageSize)));
-  const selected = paginated ? filtered.slice((page - 1) * pageSize, page * pageSize) : filtered;
   const workSegments = db.prepare("SELECT event_type,is_base,start_lat,start_lon,end_lat,end_lon,duration_seconds FROM effective_vehicle_segments WHERE work_date=? AND vehicle_id=? AND event_type IN ('stop','idle')");
   const rows = selected.map(row => {
     const { startLabel, baseReturn, endOfNorm, workdaySeconds, overtimeSeconds } = workdayMetrics(row);
@@ -485,7 +531,12 @@ function vehicleReport(url) {
       report_comment: [...new Set(comments)].join(" "),
     };
   });
-  return { rows, pagination: { page, page_size: pageSize, total, pages: Math.ceil(total / pageSize) }, totals: { days: filtered.length, vehicles: new Set(filtered.map(r => r.vehicle_id)).size, distance_km: filtered.reduce((s, r) => s + Number(r.distance_km || 0), 0), site_seconds: filtered.reduce((s, r) => s + Number(r.site_seconds || 0), 0), issues: filtered.filter(r => r.confirmation_status === "not_confirmed" || r.data_control).length }, vehicles: listVehicles().map(({ id, name, plate }) => ({ id, name, plate })) };
+  return {
+    rows,
+    pagination: { page, page_size: pageSize, total, pages: total == null ? null : Math.ceil(total / pageSize) },
+    totals,
+    vehicles: part === "all" ? listVehicles().map(({ id, name, plate }) => ({ id, name, plate })) : [],
+  };
 }
 function peopleReport(url) {
   ensureVehicleExceptions();

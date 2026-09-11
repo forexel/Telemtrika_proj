@@ -35,6 +35,12 @@ test('reports paginate, share telemetry and preserve configurable workday starts
     assert.equal(vehicles.find(v=>v.id===2).base_id,25705);
     const first=(await api('reports/vehicles?page=1&page_size=2&active_only=1')).data;
     assert.equal(first.rows.length,2);assert.equal(first.pagination.total,6);assert.equal(first.totals.distance_km,120);
+    const fastRows=(await api('reports/vehicles?part=rows&page=1&page_size=2&active_only=1')).data;
+    assert.equal(fastRows.rows.length,2);assert.equal(fastRows.pagination.total,null);
+    const summary=(await api('reports/vehicles?part=summary&page=1&page_size=2&active_only=1')).data;
+    assert.equal(summary.rows.length,0);assert.equal(summary.pagination.total,6);assert.equal(summary.totals.distance_km,120);
+    assert.equal((await api('reports/vehicles?vehicle_id=1&vehicle_id=2')).data.rows.length,6);
+    assert.equal((await api('reports/vehicles?vehicle_none=1')).data.rows.length,0);
     const source=(await api('reports/vehicles?vehicle_id=1')).data.rows;
     const target=(await api('reports/vehicles?vehicle_id=2')).data.rows;
     assert.equal(target.length,3);assert.equal(target[0].workday_seconds,9*3600);assert.equal(target[0].base_departure,source[0].base_departure);
