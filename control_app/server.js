@@ -454,13 +454,10 @@ function vehicleReport(url) {
     where.push(`d.vehicle_id IN (${vehicleIds.map(() => "?").join(",")})`);
     whereParams.push(...vehicleIds);
   }
-  if (activeOnly) where.push(`COALESCE(d.distance_km,0)>0 AND EXISTS (
-    SELECT 1 FROM effective_vehicle_segments active_segment
-    WHERE active_segment.work_date=d.work_date
-      AND active_segment.vehicle_id=d.vehicle_id
-      AND active_segment.event_type='movement'
-      AND COALESCE(active_segment.distance_km,0)>0
-  )`);
+  // A positive daily distance is derived from GLONASS movement events, so it is
+  // both the activity signal and a much cheaper filter than probing segments
+  // again for every report row.
+  if (activeOnly) where.push("COALESCE(d.distance_km,0)>0");
   if (search) {
     const like = `%${search}%`;
     where.push(`(
@@ -496,24 +493,51 @@ function vehicleReport(url) {
   }
   const limitSql = paginated ? " LIMIT ? OFFSET ?" : "";
   const rowParams = [...whereParams, ...(paginated ? [pageSize, (page - 1) * pageSize] : [])];
-  const selected = db.prepare(`SELECT d.*,v.name vehicle_name,v.plate vehicle_plate,v.glonass_name,
-    COALESCE(NULLIF((SELECT GROUP_CONCAT(DISTINCT a.work_object) FROM assignments a WHERE a.work_date=d.work_date AND a.vehicle_id=d.vehicle_id AND a.source='google'),''),(SELECT GROUP_CONCAT(DISTINCT a.work_object) FROM assignments a WHERE a.work_date=d.work_date AND a.vehicle_id=d.vehicle_id),d.work_object) objects,
-    COALESCE(NULLIF((SELECT COUNT(DISTINCT a.work_object) FROM assignments a WHERE a.work_date=d.work_date AND a.vehicle_id=d.vehicle_id AND a.source='google'),0),(SELECT COUNT(DISTINCT a.work_object) FROM assignments a WHERE a.work_date=d.work_date AND a.vehicle_id=d.vehicle_id)) object_count,
-    COALESCE(NULLIF((SELECT GROUP_CONCAT(DISTINCT a.employee_name) FROM assignments a WHERE a.work_date=d.work_date AND a.vehicle_id=d.vehicle_id AND a.source='google'),''),(SELECT GROUP_CONCAT(DISTINCT a.employee_name) FROM assignments a WHERE a.work_date=d.work_date AND a.vehicle_id=d.vehicle_id)) crew,
-    COALESCE(NULLIF((SELECT GROUP_CONCAT(DISTINCT a.work_type) FROM assignments a WHERE a.work_date=d.work_date AND a.vehicle_id=d.vehicle_id AND a.source='google' AND a.work_type!=''),''),(SELECT GROUP_CONCAT(DISTINCT a.work_type) FROM assignments a WHERE a.work_date=d.work_date AND a.vehicle_id=d.vehicle_id AND a.work_type!='')) work_types,
-    COALESCE(NULLIF((SELECT GROUP_CONCAT(DISTINCT a.employee_name || '|' || a.vehicle_label) FROM assignments a WHERE a.work_date=d.work_date AND a.vehicle_id=d.vehicle_id AND a.source='google' AND TRIM(COALESCE(a.vehicle_label,''))!=''),''),(SELECT GROUP_CONCAT(DISTINCT a.employee_name || '|' || a.vehicle_label) FROM assignments a WHERE a.work_date=d.work_date AND a.vehicle_id=d.vehicle_id AND TRIM(COALESCE(a.vehicle_label,''))!='')) vehicle_entries,
-    (SELECT GROUP_CONCAT(DISTINCT a.employee_name) FROM assignments a
-      JOIN employees master ON master.name=a.employee_name
-      WHERE a.work_date=d.work_date AND a.vehicle_id=d.vehicle_id AND a.source='google' AND (master.position LIKE '%Мастер%' OR master.position LIKE '%мастер%')) masters,
-    (SELECT COUNT(*) FROM effective_vehicle_segments s WHERE s.work_date=d.work_date AND s.vehicle_id=d.vehicle_id AND s.event_type='movement') movement_segments,
-    (SELECT COUNT(*) FROM effective_vehicle_segments s WHERE s.work_date=d.work_date AND s.vehicle_id=d.vehicle_id AND s.event_type IN ('movement','stop','idle')) segment_count,
-    (SELECT COUNT(*) FROM effective_vehicle_segments s WHERE s.work_date=d.work_date AND s.vehicle_id=d.vehicle_id AND s.event_type IN ('stop','idle') AND s.is_base=0 AND s.duration_seconds>=300) work_stops
+  const selected = db.prepare(`SELECT d.*,v.name vehicle_name,v.plate vehicle_plate,v.glonass_name
     FROM effective_vehicle_days d JOIN vehicles v ON v.id=d.vehicle_id
     WHERE ${whereSql}
     ORDER BY d.work_date DESC,v.name${limitSql}`).all(...rowParams);
   const activeVehicles = db.prepare("SELECT id,name,plate FROM vehicles WHERE active=1").all();
-  const workSegments = db.prepare("SELECT event_type,is_base,start_lat,start_lon,end_lat,end_lon,duration_seconds FROM effective_vehicle_segments WHERE work_date=? AND vehicle_id=? AND event_type IN ('stop','idle')");
-  const rows = selected.map(row => {
+  const assignmentMap = new Map(), segmentMapForPage = new Map();
+  if (selected.length) {
+    const pairWhere = selected.map(() => "(work_date=? AND vehicle_id=?)").join(" OR ");
+    const pairParams = selected.flatMap(row => [row.work_date, row.vehicle_id]);
+    for (const assignment of db.prepare(`SELECT work_date,vehicle_id,work_object,employee_name,work_type,vehicle_label,source FROM assignments WHERE ${pairWhere}`).all(...pairParams)) {
+      const key = `${assignment.work_date}|${assignment.vehicle_id}`;
+      if (!assignmentMap.has(key)) assignmentMap.set(key, []);
+      assignmentMap.get(key).push(assignment);
+    }
+    for (const segment of db.prepare(`SELECT work_date,vehicle_id,event_type,is_base,start_lat,start_lon,end_lat,end_lon,duration_seconds,distance_km FROM effective_vehicle_segments WHERE ${pairWhere}`).all(...pairParams)) {
+      const key = `${segment.work_date}|${segment.vehicle_id}`;
+      if (!segmentMapForPage.has(key)) segmentMapForPage.set(key, []);
+      segmentMapForPage.get(key).push(segment);
+    }
+  }
+  const employeePositions = new Map(db.prepare("SELECT name,position FROM employees").all().map(employee => [employee.name, employee.position || ""]));
+  const preferredValues = (items, getter) => {
+    const google = items.filter(item => item.source === "google").map(getter).filter(Boolean);
+    return [...new Set((google.length ? google : items.map(getter).filter(Boolean)))];
+  };
+  const rows = selected.map(rawRow => {
+    const key = `${rawRow.work_date}|${rawRow.vehicle_id}`;
+    const assignments = assignmentMap.get(key) || [], pageSegments = segmentMapForPage.get(key) || [];
+    const objects = preferredValues(assignments, item => String(item.work_object || "").trim());
+    const crew = preferredValues(assignments, item => String(item.employee_name || "").trim());
+    const workTypes = preferredValues(assignments, item => String(item.work_type || "").trim());
+    const vehicleEntries = preferredValues(assignments.filter(item => String(item.vehicle_label || "").trim()), item => `${item.employee_name}|${item.vehicle_label}`);
+    const masters = [...new Set(assignments.filter(item => item.source === "google" && /мастер/i.test(employeePositions.get(item.employee_name) || "")).map(item => item.employee_name))];
+    const row = {
+      ...rawRow,
+      objects: objects.join(",") || rawRow.work_object,
+      object_count: objects.length,
+      crew: crew.join(","),
+      work_types: workTypes.join(","),
+      vehicle_entries: vehicleEntries.join(","),
+      masters: masters.join(","),
+      movement_segments: pageSegments.filter(segment => segment.event_type === "movement").length,
+      segment_count: pageSegments.filter(segment => ["movement", "stop", "idle"].includes(segment.event_type)).length,
+      work_stops: pageSegments.filter(segment => ["stop", "idle"].includes(segment.event_type) && !segment.is_base && segment.duration_seconds >= 300).length,
+    };
     const { startLabel, baseReturn, endOfNorm, workdaySeconds, overtimeSeconds } = workdayMetrics(row);
     const comments = [row.deviation_comment].filter(Boolean);
     if (!row.base_departure) comments.push("Нет зафиксированного выезда с базы.");
@@ -522,7 +546,7 @@ function vehicleReport(url) {
     return {
       ...row,
       driver: driverFromEntries(row.vehicle_entries, row.vehicle_id, activeVehicles),
-      work_seconds: confirmedWorkSeconds(row, workSegments.all(row.work_date, row.vehicle_id)),
+      work_seconds: confirmedWorkSeconds(row, pageSegments),
       workday_start: startLabel,
       workday_seconds: workdaySeconds,
       overtime_seconds: overtimeSeconds,
