@@ -416,7 +416,13 @@ function geoDistanceKm(a, b) {
 }
 function confirmedWorkSeconds(row, segments) {
   if (row.actual_lat == null || row.actual_lon == null) return Number(row.site_seconds || 0);
-  return (segments || []).filter(segment => ['stop','idle'].includes(segment.event_type) && !segment.is_base && geoDistanceKm([segment.start_lat ?? segment.end_lat, segment.start_lon ?? segment.end_lon], [row.actual_lat, row.actual_lon]) <= 1.5).reduce((sum, segment) => sum + Number(segment.duration_seconds || 0), 0);
+  const windowStart = row.site_arrival ? new Date(row.site_arrival) : null, windowEnd = row.site_departure ? new Date(row.site_departure) : null;
+  return Math.round((segments || []).filter(segment => ['stop','idle'].includes(segment.event_type) && !segment.is_base && geoDistanceKm([segment.start_lat ?? segment.end_lat, segment.start_lon ?? segment.end_lon], [row.actual_lat, row.actual_lon]) <= 1.5).reduce((sum, segment) => {
+    if (!windowStart || !windowEnd) return sum + Number(segment.duration_seconds || 0);
+    const start = new Date(segment.event_start), end = new Date(segment.event_end);
+    if ([start,end,windowStart,windowEnd].some(value => Number.isNaN(value.valueOf()))) return sum;
+    return sum + Math.max(0, (Math.min(end, windowEnd) - Math.max(start, windowStart)) / 1000);
+  }, 0));
 }
 function roadAssessment(hasFact, confirmationStatus, travel, stops) {
   if (!hasFact) return "Факт не загружен";

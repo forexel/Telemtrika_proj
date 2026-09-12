@@ -18,6 +18,33 @@ function haversine(a, b) { const r = 6371.0088, rad = x => x * Math.PI / 180, dp
 function unique(values) { return [...new Set(values.filter(Boolean).map(value => String(value).trim()).filter(Boolean))]; }
 function addressText(value) { return typeof value === "object" ? String(value?.v || value?.name || "") : String(value || ""); }
 
+function localHour(date) { return new Date(date.getTime() + 3 * 3600e3).getUTCHours(); }
+function nightOverlapSeconds(event) {
+  const begin = parseApiDate(event.dtBeg), end = parseApiDate(event.dtEnd);
+  if (!begin || !end || end <= begin) return 0;
+  let seconds = 0;
+  for (let cursor = new Date(begin); cursor < end;) {
+    const next = new Date(Math.min(end.getTime(), cursor.getTime() + 15 * 60 * 1000));
+    const hour = localHour(new Date((cursor.getTime() + next.getTime()) / 2));
+    if (hour >= 20 || hour < 6) seconds += (next - cursor) / 1000;
+    cursor = next;
+  }
+  return seconds;
+}
+export function inferParkingCenter(events) {
+  const clusters = [];
+  for (const event of events.filter(item => ["Стоянка", "Стоянка. Двигатель запущен"].includes(item.typeName))) {
+    const p = point(event), seconds = nightOverlapSeconds(event), begin = parseApiDate(event.dtBeg);
+    if (!p || !begin || seconds < 30 * 60) continue;
+    let cluster = clusters.find(item => haversine(p, item.center) <= 1);
+    if (!cluster) { cluster = { center: p, seconds: 0, dates: new Set(), latSum: 0, lonSum: 0, weight: 0 }; clusters.push(cluster); }
+    cluster.seconds += seconds; cluster.dates.add(moscowDate(begin)); cluster.latSum += p[0] * seconds; cluster.lonSum += p[1] * seconds; cluster.weight += seconds;
+    cluster.center = [cluster.latSum / cluster.weight, cluster.lonSum / cluster.weight];
+  }
+  const stable = clusters.filter(item => item.dates.size >= 2 && item.seconds >= 4 * 3600).sort((a, b) => b.seconds - a.seconds)[0];
+  return stable ? { lat: stable.center[0], lon: stable.center[1], nights: stable.dates.size, seconds: stable.seconds } : null;
+}
+
 function dominantSite(stops, isBase = event => point(event) && haversine(point(event), BASE) < 0.8) {
   const clusters = [];
   for (const event of stops) {
@@ -70,18 +97,26 @@ function atNamedBase(event, zones) {
   const begin = parseApiDate(event.dtBeg), end = parseApiDate(event.dtEnd);
   return zones.some(zone => zone.typeName === "Вход на объект" && begin >= parseApiDate(zone.dtBeg) && end <= parseApiDate(zone.dtEnd));
 }
-export function analyzeDay(events, { baseName = "", baseId = null } = {}) {
+export function analyzeDay(events, { baseName = "", baseId = null, baseCenter = null } = {}) {
   const zones = namedBaseEvents(events, baseName, baseId);
   const customBase = Boolean(baseName || baseId);
-  const isBase = customBase ? event => atNamedBase(event, zones) : event => point(event) && haversine(point(event), BASE) <= 0.8;
+  const fallbackBase = baseCenter ? [Number(baseCenter.lat), Number(baseCenter.lon)] : BASE;
+  const isBase = customBase ? event => atNamedBase(event, zones) : event => point(event) && haversine(point(event), fallbackBase) <= 1;
   const moves = movementEvents(events), stops = events.filter(event => ["Стоянка", "Стоянка. Двигатель запущен"].includes(event.typeName));
-  let site = dominantSite(stops, isBase);
-  const departures = moves.filter(event => point(event) && point(event, true) && haversine(point(event), BASE) <= 0.8 && haversine(point(event, true), BASE) > 0.8 && (!site || parseApiDate(event.dtBeg) <= site.arrival));
-  const returns = moves.filter(event => point(event) && point(event, true) && haversine(point(event), BASE) > 2 && haversine(point(event, true), BASE) <= 0.8 && (!site || parseApiDate(event.dtEnd) >= site.departure));
+  const departures = moves.filter(event => point(event) && point(event, true) && haversine(point(event), fallbackBase) <= 1 && haversine(point(event, true), fallbackBase) > 1);
+  const returns = moves.filter(event => point(event) && point(event, true) && haversine(point(event), fallbackBase) > 1 && haversine(point(event, true), fallbackBase) <= 1);
   const departure = (customBase ? zones.filter(event => event.typeName === "Выход с объекта") : departures).map(event => parseApiDate(event.dtBeg)).filter(Boolean).sort((a, b) => a - b)[0] || null;
   let returned = (customBase ? zones.filter(event => event.typeName === "Вход на объект" && (!departure || parseApiDate(event.dtBeg) > departure)) : returns).map(event => parseApiDate(customBase ? event.dtBeg : event.dtEnd)).filter(Boolean).sort((a, b) => b - a)[0] || null;
   if (departure && returned && returned <= departure) returned = null;
-  if (customBase) site = departure ? dominantSite(stops.map(event => clipEventToWindow(event, departure, returned || new Date(8640000000000000))).filter(Boolean), isBase) : null;
+  const firstEvent = events.map(event => parseApiDate(event.dtBeg)).filter(Boolean).sort((a,b) => a-b)[0];
+  const localDay = firstEvent ? moscowDate(firstEvent) : null;
+  const daytimeStart = localDay ? new Date(`${localDay}T06:00:00+03:00`) : null;
+  const daytimeEnd = localDay ? new Date(`${localDay}T22:00:00+03:00`) : null;
+  const siteWindowStart = departure && daytimeStart ? new Date(Math.max(departure, daytimeStart)) : null;
+  const siteWindowEnd = daytimeEnd ? new Date(Math.min(returned || daytimeEnd, daytimeEnd)) : returned;
+  const site = siteWindowStart && siteWindowEnd && siteWindowEnd > siteWindowStart
+    ? dominantSite(stops.map(event => clipEventToWindow(event, siteWindowStart, siteWindowEnd)).filter(Boolean), isBase)
+    : null;
   const outboundSeconds = departure && site ? Math.max(0, Math.round((site.arrival - departure) / 1000)) : null;
   const returnSeconds = returned && site ? Math.max(0, Math.round((returned - site.departure) / 1000)) : null;
   const overlap = (event, begin, end) => { const a = parseApiDate(event.dtBeg), b = parseApiDate(event.dtEnd); return !a || !b || !begin || !end ? 0 : Math.max(0, (Math.min(b, end) - Math.max(a, begin)) / 1000); };
@@ -121,10 +156,11 @@ export async function syncGlonassFacts({ db, settings, dateFrom, dateTo, vehicle
     const response = await fetch(endpoint, { method: "POST", headers: { "Content-Type": "application/json" }, signal: AbortSignal.timeout(120000), body: JSON.stringify({ unitID: Number(vehicle.glonass_unit_id), dtBeg: { type: "datetime", v: apiDate(vehicle.base_id ? new Date(fromLocal.getTime() - 86400e3) : fromLocal) }, dtEnd: { type: "datetime", v: apiDate(new Date(toLocalExclusive.getTime() - 1000)) }, keys: ["eventNoGPS", "eventObjInOut", "eventSpeedExcess", "eventTrip", "driver", "tachograph", "totalLastPoint"], inValues: { event_UseAddress: true, eventSpeedExcess_SpeedLimit: 90, eventTrip_MinStopTime: 300, ...(vehicle.base_id ? { eventObjInOut_ObjIDs: [Number(vehicle.base_id)] } : {}) } }) });
     if (!response.ok) { errors.push(`${vehicle.name} ${vehicle.plate}: ГЛОНАСС HTTP ${response.status}`); continue; }
     const body = await response.json(), allEvents = body.recordLists?.events || [];
+    const inferredParking = (vehicle.base_name || vehicle.base_id) ? null : inferParkingCenter(allEvents);
     for (let cursor = new Date(fromLocal); cursor < toLocalExclusive; cursor = new Date(cursor.getTime() + 86400e3)) {
       const day = moscowDate(cursor), assigned = db.prepare("SELECT GROUP_CONCAT(DISTINCT work_object) objects FROM assignments WHERE work_date=? AND vehicle_id=?").get(day, vehicle.id)?.objects || "";
       const dayEnd = new Date(cursor.getTime() + 86400e3);
-      const events = allEvents.map(event => clipEventToWindow(event, cursor, dayEnd)).filter(Boolean), fact = analyzeDay(events, { baseName: vehicle.base_name || "", baseId: vehicle.base_id }), selectedMoves = new Set(movementEvents(events));
+      const events = allEvents.map(event => clipEventToWindow(event, cursor, dayEnd)).filter(Boolean), fact = analyzeDay(events, { baseName: vehicle.base_name || "", baseId: vehicle.base_id, baseCenter: inferredParking }), selectedMoves = new Set(movementEvents(events));
       if (!assigned && fact.distance < 1) continue;
       const controls = unique([fact.speeding ? `Скорость выше 90 км/ч — ${fact.speeding}` : "", fact.gpsLoss ? `Потеря GPS — ${Math.round(fact.gpsLoss)} сек` : ""]).join("; ");
       const status = !assigned ? "unplanned" : fact.site ? "trip_confirmed" : fact.distance >= 5 ? "partial" : "not_confirmed";
@@ -139,7 +175,7 @@ export async function syncGlonassFacts({ db, settings, dateFrom, dateTo, vehicle
           if (!eventType) continue;
           const begin = parseApiDate(event.dtBeg), end = parseApiDate(event.dtEnd), start = point(event), finish = point(event, true), reference = start || finish;
           if (!begin || !end) continue;
-          insertSegment.run(day, vehicle.id, eventType, moscowIso(begin), moscowIso(end), Number(event.dtDelta || Math.max(0, (end - begin) / 1000)), Number(event.distance || 0), Number(event.maxSpeed || 0), start?.[0] ?? null, start?.[1] ?? null, finish?.[0] ?? null, finish?.[1] ?? null, addressText(event.addressBeg), addressText(event.addressEnd), ((vehicle.base_name || vehicle.base_id) ? atNamedBase(event, namedBaseEvents(events, vehicle.base_name, vehicle.base_id)) : reference && haversine(reference, BASE) <= 0.8) ? 1 : 0);
+          insertSegment.run(day, vehicle.id, eventType, moscowIso(begin), moscowIso(end), Number(event.dtDelta || Math.max(0, (end - begin) / 1000)), Number(event.distance || 0), Number(event.maxSpeed || 0), start?.[0] ?? null, start?.[1] ?? null, finish?.[0] ?? null, finish?.[1] ?? null, addressText(event.addressBeg), addressText(event.addressEnd), ((vehicle.base_name || vehicle.base_id) ? atNamedBase(event, namedBaseEvents(events, vehicle.base_name, vehicle.base_id)) : reference && haversine(reference, inferredParking ? [inferredParking.lat, inferredParking.lon] : BASE) <= 1) ? 1 : 0);
           segmentsSaved += 1;
         }
         db.exec("COMMIT");

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { analyzeDay, clipEventToWindow, movementEvents } from "./glonass_sync.js";
+import { analyzeDay, clipEventToWindow, inferParkingCenter, movementEvents } from "./glonass_sync.js";
 
 const dt = value => ({ type: "datetime", v: value });
 const event = (typeName, begin, end, distance = 0, from = [56.23023, 37.526005], to = [56.4, 37.7]) => ({
@@ -74,4 +74,31 @@ test('base ID identifies the shared zone even after a name change', () => {
   const result=analyzeDay(events,{baseName:'База соболь 635 и ларгус 817',baseId:25705});
   assert.equal(result.departure.toISOString(),'2026-09-10T04:02:32.000Z');
   assert.equal(result.returned.toISOString(),'2026-09-10T13:30:28.000Z');
+});
+
+test('infers a recurring night parking location', () => {
+  const home=[56.3765,37.3317], work=[56.3407,37.5478];
+  const events=[];
+  for (const [day,next] of [['07','08'],['08','09'],['09','10']]) {
+    const parking=event('Стоянка',`${day}.09.2026 21:00:00`,`${next}.09.2026 02:00:00`,0,home,home); parking.dtDelta=5*3600; events.push(parking);
+    const daytime=event('Стоянка',`${next}.09.2026 06:00:00`,`${next}.09.2026 13:00:00`,0,work,work); daytime.dtDelta=7*3600; events.push(daytime);
+  }
+  const parking=inferParkingCenter(events);
+  assert.ok(parking);
+  assert.ok(Math.abs(parking.lat-home[0])<0.001);
+  assert.ok(parking.nights>=2);
+});
+
+test('excludes night parking and selects the daytime work site', () => {
+  const home=[56.3765,37.3317], work=[56.3407,37.5478];
+  const nightBefore=event('Стоянка','11.09.2026 00:00:00','11.09.2026 04:00:00',0,home,home); nightBefore.dtDelta=4*3600;
+  const outbound=event('Движение','11.09.2026 04:00:00','11.09.2026 05:00:00',30,home,work);
+  const working=event('Стоянка','11.09.2026 05:00:00','11.09.2026 13:00:00',0,work,work); working.dtDelta=8*3600;
+  const inbound=event('Движение','11.09.2026 13:00:00','11.09.2026 14:00:00',30,work,home);
+  const nightAfter=event('Стоянка','11.09.2026 14:00:00','11.09.2026 21:00:00',0,home,home); nightAfter.dtDelta=7*3600;
+  const result=analyzeDay([nightBefore,outbound,working,inbound,nightAfter],{baseCenter:{lat:home[0],lon:home[1]}});
+  assert.equal(result.departure.toISOString(),'2026-09-11T04:00:00.000Z');
+  assert.equal(result.returned.toISOString(),'2026-09-11T14:00:00.000Z');
+  assert.ok(Math.abs(result.site.lat-work[0])<0.001);
+  assert.equal(result.site.spanSeconds,8*3600);
 });
