@@ -12,7 +12,13 @@ interface Props { refreshToken: number; target: { mode: "vehicle" | "person"; va
 
 const decimalTime = (value?: string | null) => value ? Number(value.slice(11, 13)) + Number(value.slice(14, 16)) / 60 : 0;
 function distanceKm(a: any[], b: any[]) { if (a.some(v => v == null) || b.some(v => v == null)) return Infinity; const rad = (v: number) => v * Math.PI / 180, r = 6371, dp = rad(b[0] - a[0]), dl = rad(b[1] - a[1]), h = Math.sin(dp / 2) ** 2 + Math.cos(rad(a[0])) * Math.cos(rad(b[0])) * Math.sin(dl / 2) ** 2; return 2 * r * Math.asin(Math.sqrt(h)); }
-function kind(segment: any, row: any) { if (segment.event_type === "movement") return "drive"; if (segment.is_base) return "base"; const atWork = distanceKm([segment.start_lat ?? segment.end_lat, segment.start_lon ?? segment.end_lon], [row.actual_lat, row.actual_lon]) <= 1.5; return atWork ? row.confirmation_status === "unplanned" ? "probable" : "work" : segment.event_type === "idle" ? "idle" : "stop"; }
+function overlapsSiteWindow(segment: any, row: any) {
+  if (!row.site_arrival || !row.site_departure) return false;
+  const start = Date.parse(segment.event_start), end = Date.parse(segment.event_end);
+  const siteStart = Date.parse(row.site_arrival), siteEnd = Date.parse(row.site_departure);
+  return [start, end, siteStart, siteEnd].every(Number.isFinite) && end > siteStart && start < siteEnd;
+}
+function kind(segment: any, row: any) { if (segment.event_type === "movement") return "drive"; if (segment.is_base) return "base"; const atWork = overlapsSiteWindow(segment, row) && distanceKm([segment.start_lat ?? segment.end_lat, segment.start_lon ?? segment.end_lon], [row.actual_lat, row.actual_lon]) <= 1.5; return atWork ? row.confirmation_status === "unplanned" ? "probable" : "work" : segment.event_type === "idle" ? "idle" : "stop"; }
 
 function EmployeeDailyCharts({ rows }: { rows: any[] }) {
   const days = rows.filter(row => row.fact_id || row.base_return).slice().sort((a, b) => b.work_date.localeCompare(a.work_date));

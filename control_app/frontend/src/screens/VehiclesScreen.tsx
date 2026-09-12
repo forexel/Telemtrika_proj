@@ -61,7 +61,13 @@ function Pagination({ page, pages, loading, onPage }: { page: number; pages: num
 }
 
 function kmDistance(a: any[], b: any[]) { if (a.some(v => v == null) || b.some(v => v == null)) return Infinity; const rad = (v: number) => v * Math.PI / 180, r = 6371.0088, dp = rad(b[0] - a[0]), dl = rad(b[1] - a[1]), h = Math.sin(dp / 2) ** 2 + Math.cos(rad(a[0])) * Math.cos(rad(b[0])) * Math.sin(dl / 2) ** 2; return 2 * r * Math.asin(Math.sqrt(h)); }
-function eventType(segment: any, row: any) { if (segment.event_type === "movement") return "drive"; if (segment.is_base) return "base"; const nearSite = kmDistance([segment.start_lat ?? segment.end_lat, segment.start_lon ?? segment.end_lon], [row.actual_lat, row.actual_lon]) <= 1.5; return nearSite ? "work" : segment.event_type === "idle" ? "idle" : "stop"; }
+function overlapsSiteWindow(segment: any, row: any) {
+  if (!row.site_arrival || !row.site_departure) return false;
+  const start = Date.parse(segment.event_start), end = Date.parse(segment.event_end);
+  const siteStart = Date.parse(row.site_arrival), siteEnd = Date.parse(row.site_departure);
+  return [start, end, siteStart, siteEnd].every(Number.isFinite) && end > siteStart && start < siteEnd;
+}
+function eventType(segment: any, row: any) { if (segment.event_type === "movement") return "drive"; if (segment.is_base) return "base"; const nearSite = overlapsSiteWindow(segment, row) && kmDistance([segment.start_lat ?? segment.end_lat, segment.start_lon ?? segment.end_lon], [row.actual_lat, row.actual_lon]) <= 1.5; return nearSite ? "work" : segment.event_type === "idle" ? "idle" : "stop"; }
 const eventColors: Record<string, string> = { drive: "bg-[#2563A6]", work: "bg-[#2E7D32]", stop: "bg-[#9CA3AF]", idle: "bg-[#E0A100]", base: "bg-[#374151]" };
 const eventLabels: Record<string, string> = { drive: "В пути", work: "Работа на объекте", stop: "Остановка", idle: "Простой с двигателем", base: "База" };
 
