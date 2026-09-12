@@ -145,6 +145,7 @@ export async function syncGlonassFacts({ db, settings, dateFrom, dateTo, vehicle
   if (!userId) throw new Error("ГЛОНАСС не вернул идентификатор пользователя");
   const vehicles = db.prepare(`SELECT v.*,(SELECT base_name FROM vehicle_rules WHERE vehicle_id=v.id) base_name,(SELECT base_id FROM vehicle_rules WHERE vehicle_id=v.id) base_id FROM vehicles v WHERE v.active=1 AND v.match_status='matched' AND NOT EXISTS (SELECT 1 FROM vehicle_rules r WHERE r.vehicle_id=v.id AND r.source_vehicle_id IS NOT NULL) AND (?=0 OR v.id=COALESCE((SELECT source_vehicle_id FROM vehicle_rules WHERE vehicle_id=?),?)) ORDER BY v.id`).all(vehicleId, vehicleId, vehicleId);
   const upsert = db.prepare(`INSERT INTO vehicle_days(work_date,vehicle_id,work_object,base_departure,site_arrival,site_departure,base_return,outbound_seconds,outbound_stops_seconds,return_seconds,return_stops_seconds,site_seconds,shift_seconds,distance_km,max_speed_kmh,speeding_events,idle_engine_seconds,gps_loss_seconds,actual_lat,actual_lon,confirmation_status,data_control,deviation_comment,source,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(work_date,vehicle_id) DO UPDATE SET work_object=excluded.work_object,base_departure=excluded.base_departure,site_arrival=excluded.site_arrival,site_departure=excluded.site_departure,base_return=excluded.base_return,outbound_seconds=excluded.outbound_seconds,outbound_stops_seconds=excluded.outbound_stops_seconds,return_seconds=excluded.return_seconds,return_stops_seconds=excluded.return_stops_seconds,site_seconds=excluded.site_seconds,shift_seconds=excluded.shift_seconds,distance_km=excluded.distance_km,max_speed_kmh=excluded.max_speed_kmh,speeding_events=excluded.speeding_events,idle_engine_seconds=excluded.idle_engine_seconds,gps_loss_seconds=excluded.gps_loss_seconds,actual_lat=excluded.actual_lat,actual_lon=excluded.actual_lon,confirmation_status=excluded.confirmation_status,data_control=excluded.data_control,deviation_comment=excluded.deviation_comment,source='glonass',updated_at=excluded.updated_at`);
+  const deleteDay = db.prepare("DELETE FROM vehicle_days WHERE work_date=? AND vehicle_id=? AND source='glonass'");
   const deleteSegments = db.prepare("DELETE FROM vehicle_segments WHERE work_date=? AND vehicle_id=?");
   const insertSegment = db.prepare(`INSERT INTO vehicle_segments(work_date,vehicle_id,event_type,event_start,event_end,duration_seconds,distance_km,max_speed_kmh,start_lat,start_lon,end_lat,end_lon,address_start,address_end,is_base,source) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'glonass')`);
   let daysSaved = 0, segmentsSaved = 0, vehicleIndex = 0, errors = [];
@@ -161,7 +162,12 @@ export async function syncGlonassFacts({ db, settings, dateFrom, dateTo, vehicle
       const day = moscowDate(cursor), assigned = db.prepare("SELECT GROUP_CONCAT(DISTINCT work_object) objects FROM assignments WHERE work_date=? AND vehicle_id=?").get(day, vehicle.id)?.objects || "";
       const dayEnd = new Date(cursor.getTime() + 86400e3);
       const events = allEvents.map(event => clipEventToWindow(event, cursor, dayEnd)).filter(Boolean), fact = analyzeDay(events, { baseName: vehicle.base_name || "", baseId: vehicle.base_id, baseCenter: inferredParking }), selectedMoves = new Set(movementEvents(events));
-      if (!assigned && fact.distance < 1) continue;
+      if (!assigned && fact.distance < 1) {
+        db.exec("BEGIN");
+        try { deleteSegments.run(day, vehicle.id); deleteDay.run(day, vehicle.id); db.exec("COMMIT"); }
+        catch (error) { db.exec("ROLLBACK"); throw error; }
+        continue;
+      }
       const controls = unique([fact.speeding ? `Скорость выше 90 км/ч — ${fact.speeding}` : "", fact.gpsLoss ? `Потеря GPS — ${Math.round(fact.gpsLoss)} сек` : ""]).join("; ");
       const status = !assigned ? "unplanned" : fact.site ? "trip_confirmed" : fact.distance >= 5 ? "partial" : "not_confirmed";
       const comment = !assigned ? "Движение зафиксировано, но разнарядка на этот автомобиль не найдена." : fact.site ? "Факт автомобиля применяется ко всем сотрудникам этой бригады." : fact.distance >= 5 ? "Есть движение, но рабочая точка не выделена." : "Разнарядка есть, значимого выезда по ГЛОНАСС не найдено.";
