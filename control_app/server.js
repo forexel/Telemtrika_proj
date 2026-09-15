@@ -643,8 +643,9 @@ function peopleReport(url) {
   const enrichedRows = rows.map(row => {
     const { startLabel, baseReturn, endOfNorm, workdaySeconds, overtimeSeconds } = workdayMetrics(row, { fallbackToSchedule: true });
     const transitDifferenceSeconds = row.outbound_seconds != null && row.return_seconds != null ? Number(row.outbound_seconds) - Number(row.return_seconds) : null;
-    const comments = [row.deviation_comment].filter(Boolean);
-    const worksAtBase = String(row.work_object || "").toLocaleLowerCase("ru-RU").includes("баз");
+    const objects = String(row.work_object || "").split(",").map(value => value.trim()).filter(Boolean);
+    const worksAtBase = objects.length > 0 && objects.every(value => value.toLocaleLowerCase("ru-RU").includes("баз"));
+    const comments = worksAtBase ? [] : [row.deviation_comment].filter(Boolean);
     if (!row.vehicle_id && worksAtBase) comments.push("Работа на базе по нормативному графику 08:00–17:00.");
     else if (!row.vehicle_id) comments.push("В разнарядке нельзя однозначно определить автомобиль.");
     else if (!row.fact_id) comments.push("Факт ГЛОНАСС по назначенному автомобилю ещё не загружен.");
@@ -654,15 +655,15 @@ function peopleReport(url) {
     return {
       ...row,
       driver,
-      work_seconds: confirmedWorkSeconds(row, segments.get(`${row.work_date}|${row.vehicle_id}`) || []),
+      work_seconds: worksAtBase ? 9 * 3600 : confirmedWorkSeconds(row, segments.get(`${row.work_date}|${row.vehicle_id}`) || []),
       workday_start: startLabel,
       workday_end: "17:00",
-      workday_seconds: workdaySeconds,
-      overtime_seconds: overtimeSeconds,
+      workday_seconds: worksAtBase ? 9 * 3600 : workdaySeconds,
+      overtime_seconds: worksAtBase ? 0 : overtimeSeconds,
       works_at_base: worksAtBase,
       transit_difference_seconds: transitDifferenceSeconds,
-      outbound_assessment: roadAssessment(Boolean(row.fact_id), row.confirmation_status, row.outbound_seconds, row.outbound_stops_seconds),
-      return_assessment: roadAssessment(Boolean(row.fact_id), row.confirmation_status, row.return_seconds, row.return_stops_seconds),
+      outbound_assessment: worksAtBase ? "Не применяется" : roadAssessment(Boolean(row.fact_id), row.confirmation_status, row.outbound_seconds, row.outbound_stops_seconds),
+      return_assessment: worksAtBase ? "Не применяется" : roadAssessment(Boolean(row.fact_id), row.confirmation_status, row.return_seconds, row.return_stops_seconds),
       report_comment: [...new Set(comments)].join(" "),
     };
   });

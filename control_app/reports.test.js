@@ -22,6 +22,7 @@ test('reports paginate, share telemetry and preserve configurable workday starts
     insert.run(1,'Соболь','А635СО777','А635СО777','now');
     insert.run(2,'Ларгус','Т817НМ777','Т817НМ777','now');
     db.prepare("INSERT INTO assignments(work_date,work_object,employee_name,source) VALUES('2026-09-01','База','Сотрудник базы','google')").run();
+    db.prepare("INSERT INTO assignments(work_date,work_object,employee_name,vehicle_label,vehicle_id,source) VALUES('2026-09-01','База','Сотрудник базы с авто','Соболь А635СО777',1,'google')").run();
     for(let i=1;i<=3;i++){
       const date=`2026-09-0${i}`;
       db.prepare("INSERT INTO vehicle_days(work_date,vehicle_id,base_departure,base_return,distance_km,updated_at,base_zone_name,base_zone_id) VALUES(?,1,?,?,20,'now','База соболь 635 и ларгус 817',25705)").run(date,`${date}T09:00:00+03:00`,`${date}T18:00:00+03:00`);
@@ -49,6 +50,8 @@ test('reports paginate, share telemetry and preserve configurable workday starts
     assert.equal((await api('reports/vehicles?page=1&search=Ларгус')).data.pagination.total,3);
     const baseWorker=(await api('reports/people?date_from=2026-09-01&date_to=2026-09-01&employee=%D0%A1%D0%BE%D1%82%D1%80%D1%83%D0%B4%D0%BD%D0%B8%D0%BA%20%D0%B1%D0%B0%D0%B7%D1%8B')).data.rows[0];
     assert.equal(baseWorker.workday_start,'08:00');assert.equal(baseWorker.workday_end,'17:00');assert.equal(baseWorker.workday_seconds,9*3600);assert.equal(baseWorker.overtime_seconds,0);assert.equal(baseWorker.works_at_base,true);
+    const linkedBaseWorker=(await api('reports/people?date_from=2026-09-01&date_to=2026-09-01&employee=%D0%A1%D0%BE%D1%82%D1%80%D1%83%D0%B4%D0%BD%D0%B8%D0%BA%20%D0%B1%D0%B0%D0%B7%D1%8B%20%D1%81%20%D0%B0%D0%B2%D1%82%D0%BE')).data.rows[0];
+    assert.equal(linkedBaseWorker.workday_seconds,9*3600);assert.equal(linkedBaseWorker.overtime_seconds,0);assert.equal(linkedBaseWorker.work_seconds,9*3600);assert.equal(linkedBaseWorker.outbound_assessment,'Не применяется');
     assert.equal((await api('vehicles/1/rule',{source_vehicle_id:2})).status,400);
     assert.equal((await api('vehicles/1/rule',{departure_start:false})).status,200);
     assert.equal((await api('reports/vehicles?vehicle_id=2')).data.rows[0].workday_seconds,10*3600);
