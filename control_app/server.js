@@ -433,17 +433,20 @@ function roadAssessment(hasFact, confirmationStatus, travel, stops) {
   if (stopped > 10 * 60) return "Есть задержка в пути";
   return "Без заметных задержек";
 }
-function workdayMetrics(row) {
+function workdayMetrics(row, { fallbackToSchedule = false } = {}) {
   const rule = db.prepare("SELECT COALESCE(source.departure_start,r.departure_start,0) departure_start FROM vehicle_rules r LEFT JOIN vehicle_rules source ON source.vehicle_id=r.source_vehicle_id WHERE r.vehicle_id=?").get(row.vehicle_id);
   const startOfDay = rule?.departure_start ? (row.base_departure ? new Date(row.base_departure) : null) : new Date(`${row.work_date}T08:00:00+03:00`);
   const endOfNorm = new Date(`${row.work_date}T17:00:00+03:00`);
   const baseReturn = row.base_return ? new Date(row.base_return) : null;
+  const validReturn = baseReturn && !Number.isNaN(baseReturn.valueOf()) ? baseReturn : null;
+  const endOfDay = validReturn || (fallbackToSchedule ? endOfNorm : null);
   return {
     startLabel: rule?.departure_start ? (row.base_departure?.slice(11,16) || "Не зафиксирован") : "08:00",
-    baseReturn,
+    endLabel: validReturn ? row.base_return.slice(11,16) : fallbackToSchedule ? "17:00" : "Не зафиксирован",
+    baseReturn: validReturn,
     endOfNorm,
-    workdaySeconds: startOfDay && baseReturn && !Number.isNaN(baseReturn.valueOf()) ? Math.max(0, Math.round((baseReturn - startOfDay) / 1000)) : null,
-    overtimeSeconds: baseReturn && !Number.isNaN(baseReturn.valueOf()) ? Math.max(0, Math.round((baseReturn - endOfNorm) / 1000)) : null,
+    workdaySeconds: startOfDay && endOfDay ? Math.max(0, Math.round((endOfDay - startOfDay) / 1000)) : null,
+    overtimeSeconds: validReturn ? Math.max(0, Math.round((validReturn - endOfNorm) / 1000)) : fallbackToSchedule ? 0 : null,
   };
 }
 function peopleList() {
@@ -638,10 +641,12 @@ function peopleReport(url) {
   `).all(from, to, ...employees);
   const activeVehicles = db.prepare("SELECT id,name,plate FROM vehicles WHERE active=1").all(), segments = segmentMap(from, to);
   const enrichedRows = rows.map(row => {
-    const { startLabel, baseReturn, endOfNorm, workdaySeconds, overtimeSeconds } = workdayMetrics(row);
+    const { startLabel, baseReturn, endOfNorm, workdaySeconds, overtimeSeconds } = workdayMetrics(row, { fallbackToSchedule: true });
     const transitDifferenceSeconds = row.outbound_seconds != null && row.return_seconds != null ? Number(row.outbound_seconds) - Number(row.return_seconds) : null;
     const comments = [row.deviation_comment].filter(Boolean);
-    if (!row.vehicle_id) comments.push("В разнарядке нельзя однозначно определить автомобиль.");
+    const worksAtBase = String(row.work_object || "").toLocaleLowerCase("ru-RU").includes("баз");
+    if (!row.vehicle_id && worksAtBase) comments.push("Работа на базе по нормативному графику 08:00–17:00.");
+    else if (!row.vehicle_id) comments.push("В разнарядке нельзя однозначно определить автомобиль.");
     else if (!row.fact_id) comments.push("Факт ГЛОНАСС по назначенному автомобилю ещё не загружен.");
     if (baseReturn && baseReturn < endOfNorm) comments.push(`Возврат на базу раньше 17:00.`);
     if (!comments.length) comments.push("Отклонений от обычного не выявлено.");
@@ -651,8 +656,10 @@ function peopleReport(url) {
       driver,
       work_seconds: confirmedWorkSeconds(row, segments.get(`${row.work_date}|${row.vehicle_id}`) || []),
       workday_start: startLabel,
+      workday_end: "17:00",
       workday_seconds: workdaySeconds,
       overtime_seconds: overtimeSeconds,
+      works_at_base: worksAtBase,
       transit_difference_seconds: transitDifferenceSeconds,
       outbound_assessment: roadAssessment(Boolean(row.fact_id), row.confirmation_status, row.outbound_seconds, row.outbound_stops_seconds),
       return_assessment: roadAssessment(Boolean(row.fact_id), row.confirmation_status, row.return_seconds, row.return_stops_seconds),

@@ -98,7 +98,7 @@ export default function EmployeesScreen({ onViewAnalytics, refreshToken }: Emplo
     api<any>(`reports/people?${query({ date_from: dateFrom, date_to: dateTo, employee: selectedEmployees })}`).then(data => {
       setAllEmployees(data.people || []); setTotals(data.totals || {});
       setEmployeeRows((data.rows || []).map((row: any) => ({
-        id: `${row.work_date}|${row.employee_name}`, date: dateRu(row.work_date), employee: row.employee_name, position: row.employee_position || "Не указана", object: row.work_object || "", workType: row.work_type || "—", vehicle: row.vehicle_name || "—", plate: row.vehicle_plate || "—", driver: row.driver || "—", master: row.masters || "—", brigade: row.crew || "—", startDay: row.workday_start || "08:00", departBase: time(row.base_departure), arriveObject: time(row.site_arrival), routeTime: duration(row.outbound_seconds), stopsEnRoute: duration(row.outbound_stops_seconds), routeRating: row.outbound_assessment || "—", departObject: time(row.site_departure), returnBase: time(row.base_return), returnTime: duration(row.return_seconds), stopsReturn: duration(row.return_stops_seconds), returnRating: row.return_assessment || "—", onObject: duration(row.work_seconds ?? row.site_seconds), workDay: duration(row.workday_seconds), overtime: duration(row.overtime_seconds), mileage: row.fact_id ? `${numberRu(row.distance_km)} км` : "—", status: row.vehicle_id ? reportStatus(row.confirmation_status) as any : "no-vehicle", control: row.data_control || (row.fact_id ? "Без замечаний" : "—"), comment: row.report_comment || "", mergedCount: Number(row.assignment_rows) > 1 ? Number(row.assignment_rows) : undefined,
+        id: `${row.work_date}|${row.employee_name}`, date: dateRu(row.work_date), employee: row.employee_name, position: row.employee_position || "Не указана", object: row.work_object || "", workType: row.work_type || "—", vehicle: row.vehicle_name || "—", plate: row.vehicle_plate || "—", driver: row.driver || "—", master: row.masters || "—", brigade: row.crew || "—", startDay: row.workday_start || "08:00", endDay: row.workday_end || "17:00", departBase: time(row.base_departure), arriveObject: time(row.site_arrival), routeTime: duration(row.outbound_seconds), stopsEnRoute: duration(row.outbound_stops_seconds), routeRating: row.outbound_assessment || "—", departObject: time(row.site_departure), returnBase: time(row.base_return), returnTime: duration(row.return_seconds), stopsReturn: duration(row.return_stops_seconds), returnRating: row.return_assessment || "—", onObject: duration(row.work_seconds ?? row.site_seconds), workDay: duration(row.workday_seconds), overtime: duration(row.overtime_seconds), mileage: row.fact_id ? `${numberRu(row.distance_km)} км` : "—", status: row.works_at_base ? "base-work" : row.vehicle_id ? reportStatus(row.confirmation_status) as any : "no-vehicle", control: row.data_control || (row.fact_id ? "Без замечаний" : "—"), comment: row.report_comment || "", mergedCount: Number(row.assignment_rows) > 1 ? Number(row.assignment_rows) : undefined,
       })));
     }).catch(e => setError(e.message)).finally(() => setLoading(false));
   }, [requestKey, refreshToken]);
@@ -160,7 +160,7 @@ export default function EmployeesScreen({ onViewAnalytics, refreshToken }: Emplo
           {loading ? <div className="py-20 flex justify-center text-[#6B7280]"><Spinner size={24} /></div> : filtered.length === 0 ? (
             <EmptyState title={error ? "Не удалось загрузить отчёт" : "Ничего не найдено"} description={error || "Попробуйте изменить фильтры"} />
           ) : (
-            <table id="employees-table" className="w-full border-collapse" style={{ minWidth: 3300 }}>
+            <table id="employees-table" className="w-full border-collapse" style={{ minWidth: 3410 }}>
               <thead className="sticky top-0 z-10">
                 <tr>
                   <th className={`${th} sticky left-0 z-20 bg-[#F9FAFB]`} style={{ minWidth: 80 }}>Дата</th>
@@ -174,6 +174,7 @@ export default function EmployeesScreen({ onViewAnalytics, refreshToken }: Emplo
                   <th className={th} style={{ minWidth: 100 }}>Мастер</th>
                   <th className={th} style={{ minWidth: 180 }}>Бригада</th>
                   <th className={th} style={{ minWidth: 90 }}>Начало дня</th>
+                  <th className={th} style={{ minWidth: 110 }}>Окончание дня</th>
                   <th className={th} style={{ minWidth: 110 }}>Выезд с базы</th>
                   <th className={th} style={{ minWidth: 140 }}>Прибытие на объект</th>
                   <th className={th} style={{ minWidth: 120 }}>Путь на объект</th>
@@ -209,7 +210,7 @@ export default function EmployeesScreen({ onViewAnalytics, refreshToken }: Emplo
 }
 
 function EmployeeTableRow({ row, onViewAnalytics }: { row: EmployeeRow; onViewAnalytics: () => void }) {
-  const noVehicle = row.status === "no-vehicle";
+  const noVehicle = row.status === "no-vehicle" || row.status === "base-work";
 
   return (
     <tr
@@ -244,6 +245,7 @@ function EmployeeTableRow({ row, onViewAnalytics }: { row: EmployeeRow; onViewAn
         <span className="block max-w-[160px] truncate" title={row.brigade}>{row.brigade}</span>
       </td>
       <td className={td}>{row.startDay}</td>
+      <td className={td}>{row.endDay}</td>
       <td className={noVehicle ? tdMuted : td}>{row.departBase}</td>
       <td className={noVehicle ? tdMuted : td}>{row.arriveObject}</td>
       <td className={noVehicle ? tdMuted : td}>{row.routeTime}</td>

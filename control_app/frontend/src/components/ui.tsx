@@ -290,6 +290,7 @@ export function VehicleStatusBadge({ status }: { status: string }) {
     unconfirmed: ["error", "Выезд не подтверждён"],
     "no-schedule": ["info", "Поездка без разнарядки"],
     "no-vehicle": ["warning", "Автомобиль не определён"],
+    "base-work": ["neutral", "Работа на базе"],
     check: ["warning", "Требует проверки"],
   };
   const [variant, label] = map[status] ?? ["neutral", status];
