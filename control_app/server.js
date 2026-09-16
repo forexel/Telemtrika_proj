@@ -573,8 +573,9 @@ function vehicleReport(url) {
 }
 function peopleReport(url) {
   ensureVehicleExceptions();
-  const { from, to, employees } = filters(url), employeeWhere = employees.length ? ` AND employee_name IN (${employees.map(() => "?").join(",")})` : "";
-  const rows = db.prepare(`
+  const { from, to, employees } = filters(url);
+  const employeeWhere = employees.length ? ` AND employee_name IN (${employees.map(() => "?").join(",")})` : "";
+  const cte = `
     WITH object_rows AS (
       SELECT
         work_date,
@@ -616,7 +617,44 @@ function peopleReport(url) {
         SUM(assignment_rows) assignment_rows
       FROM object_rows
       GROUP BY work_date,employee_name
-    )
+    )`;
+  const search = String(url.searchParams.get("search") || "").trim();
+  const searchWhere = search ? `WHERE (
+    daily.employee_name LIKE ? COLLATE NOCASE OR daily.work_object LIKE ? COLLATE NOCASE OR
+    COALESCE(v.name,'') LIKE ? COLLATE NOCASE OR COALESCE(v.plate,'') LIKE ? COLLATE NOCASE
+  )` : "";
+  const params = [from, to, ...employees], searchParams = search ? Array(4).fill(`%${search}%`) : [];
+  const pageSize = Math.min(100, Math.max(1, Number(url.searchParams.get("page_size")) || 50));
+  const requestedPage = Math.max(1, Math.floor(Number(url.searchParams.get("page")) || 1));
+  const paginated = url.searchParams.has("page"), part = url.searchParams.get("part") || "all";
+  const people = peopleList();
+  const summary = () => {
+    const row = db.prepare(`${cte}
+      SELECT COUNT(*) rows,COALESCE(SUM(daily.assignment_rows),0) assignments,
+        COUNT(DISTINCT daily.employee_name) people,
+        COALESCE(SUM(CASE WHEN daily.vehicle_id IS NOT NULL THEN 1 ELSE 0 END),0) linked,
+        COALESCE(SUM(CASE WHEN d.id IS NOT NULL THEN 1 ELSE 0 END),0) fact,
+        COALESCE(SUM(CASE
+          WHEN daily.work_object LIKE '%Баз%' OR daily.work_object LIKE '%баз%' THEN 0
+          WHEN daily.vehicle_id IS NULL OR d.id IS NULL THEN 1 ELSE 0 END),0) review
+      FROM daily
+      LEFT JOIN vehicles v ON v.id=daily.vehicle_id
+      LEFT JOIN effective_vehicle_days d ON d.work_date=daily.work_date AND d.vehicle_id=daily.vehicle_id
+      ${searchWhere}`).get(...params, ...searchParams);
+    return Object.fromEntries(Object.entries(row).map(([key, value]) => [key, Number(value || 0)]));
+  };
+  if (part === "summary") {
+    const totals = summary(), total = totals.rows, pages = Math.ceil(total / pageSize);
+    return { rows: [], totals, people, pagination: { page: Math.min(requestedPage, Math.max(1, pages)), page_size: pageSize, total, pages } };
+  }
+  let totals = {}, total = null, page = requestedPage;
+  if (part === "all") {
+    totals = summary(); total = totals.rows;
+    page = Math.min(requestedPage, Math.max(1, Math.ceil(total / pageSize)));
+  }
+  const limitSql = paginated ? " LIMIT ? OFFSET ?" : "";
+  const rowParams = [...params, ...searchParams, ...(paginated ? [pageSize, (page - 1) * pageSize] : [])];
+  const rows = db.prepare(`${cte}
     SELECT daily.*,emp.position employee_position,v.name vehicle_name,v.plate vehicle_plate,
       d.id fact_id,d.base_departure,d.site_arrival,d.site_departure,d.base_return,
       d.outbound_seconds,d.outbound_stops_seconds,d.return_seconds,d.return_stops_seconds,
@@ -637,9 +675,22 @@ function peopleReport(url) {
     LEFT JOIN employees emp ON emp.name=daily.employee_name
     LEFT JOIN vehicles v ON v.id=daily.vehicle_id
     LEFT JOIN effective_vehicle_days d ON d.work_date=daily.work_date AND d.vehicle_id=daily.vehicle_id
+    ${searchWhere}
     ORDER BY daily.work_date DESC,daily.employee_name
-  `).all(from, to, ...employees);
-  const activeVehicles = db.prepare("SELECT id,name,plate FROM vehicles WHERE active=1").all(), segments = segmentMap(from, to);
+    ${limitSql}
+  `).all(...rowParams);
+  const activeVehicles = db.prepare("SELECT id,name,plate FROM vehicles WHERE active=1").all(), segments = new Map();
+  const factRows = rows.filter(row => row.vehicle_id);
+  if (factRows.length) {
+    const uniquePairs = [...new Map(factRows.map(row => [`${row.work_date}|${row.vehicle_id}`, row])).values()];
+    const pairWhere = uniquePairs.map(() => "(work_date=? AND vehicle_id=?)").join(" OR ");
+    const pairParams = uniquePairs.flatMap(row => [row.work_date, row.vehicle_id]);
+    for (const segment of db.prepare(`SELECT * FROM effective_vehicle_segments WHERE ${pairWhere} ORDER BY work_date,event_start`).all(...pairParams)) {
+      const key = `${segment.work_date}|${segment.vehicle_id}`;
+      if (!segments.has(key)) segments.set(key, []);
+      segments.get(key).push(segment);
+    }
+  }
   const enrichedRows = rows.map(row => {
     const { startLabel, baseReturn, endOfNorm, workdaySeconds, overtimeSeconds } = workdayMetrics(row, { fallbackToSchedule: true });
     const transitDifferenceSeconds = row.outbound_seconds != null && row.return_seconds != null ? Number(row.outbound_seconds) - Number(row.return_seconds) : null;
@@ -667,8 +718,12 @@ function peopleReport(url) {
       report_comment: [...new Set(comments)].join(" "),
     };
   });
-  const people = peopleList();
-  return { rows: enrichedRows, totals: { rows: rows.length, assignments: rows.reduce((sum, row) => sum + Number(row.assignment_rows || 0), 0), people: new Set(rows.map(r => r.employee_name)).size, linked: rows.filter(r => r.vehicle_id).length, fact: rows.filter(r => r.fact_id).length }, people };
+  return {
+    rows: enrichedRows,
+    totals,
+    people: part === "all" ? people : [],
+    pagination: { page, page_size: pageSize, total, pages: total == null ? null : Math.ceil(total / pageSize) },
+  };
 }
 
 function analyticsReport(url) {

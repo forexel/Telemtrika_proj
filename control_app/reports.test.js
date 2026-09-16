@@ -52,6 +52,12 @@ test('reports paginate, share telemetry and preserve configurable workday starts
     assert.equal(baseWorker.workday_start,'08:00');assert.equal(baseWorker.workday_end,'17:00');assert.equal(baseWorker.workday_seconds,9*3600);assert.equal(baseWorker.overtime_seconds,0);assert.equal(baseWorker.works_at_base,true);
     const linkedBaseWorker=(await api('reports/people?date_from=2026-09-01&date_to=2026-09-01&employee=%D0%A1%D0%BE%D1%82%D1%80%D1%83%D0%B4%D0%BD%D0%B8%D0%BA%20%D0%B1%D0%B0%D0%B7%D1%8B%20%D1%81%20%D0%B0%D0%B2%D1%82%D0%BE')).data.rows[0];
     assert.equal(linkedBaseWorker.workday_seconds,9*3600);assert.equal(linkedBaseWorker.overtime_seconds,0);assert.equal(linkedBaseWorker.work_seconds,9*3600);assert.equal(linkedBaseWorker.outbound_assessment,'Не применяется');
+    const peoplePage=(await api('reports/people?date_from=2026-09-01&date_to=2026-09-01&part=rows&page=1&page_size=1')).data;
+    assert.equal(peoplePage.rows.length,1);assert.equal(peoplePage.pagination.total,null);
+    const peopleSummary=(await api('reports/people?date_from=2026-09-01&date_to=2026-09-01&part=summary&page=1&page_size=1')).data;
+    assert.equal(peopleSummary.rows.length,0);assert.equal(peopleSummary.pagination.total,2);assert.equal(peopleSummary.pagination.pages,2);assert.equal(peopleSummary.totals.review,0);
+    const peopleSearch=(await api('reports/people?date_from=2026-09-01&date_to=2026-09-01&part=summary&page=1&page_size=1&search=%D1%81%20%D0%B0%D0%B2%D1%82%D0%BE')).data;
+    assert.equal(peopleSearch.pagination.total,1);
     assert.equal((await api('vehicles/1/rule',{source_vehicle_id:2})).status,400);
     assert.equal((await api('vehicles/1/rule',{departure_start:false})).status,200);
     assert.equal((await api('reports/vehicles?vehicle_id=2')).data.rows[0].workday_seconds,10*3600);
