@@ -37,3 +37,19 @@ export function exportTable(tableId: string, name: string, title?: string) {
   link.href = URL.createObjectURL(new Blob(["\ufeff", html], { type: "application/vnd.ms-excel;charset=utf-8" }));
   link.download = `${name}_${today()}.xls`; link.click(); setTimeout(() => URL.revokeObjectURL(link.href), 1000); return true;
 }
+
+const escapeCell = (value: unknown) => String(value ?? "").replace(/[&<>"']/g, character => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[character] || character));
+
+export function exportRows(headers: string[], rows: unknown[][], name: string, title?: string) {
+  const head = `<thead><tr>${headers.map(value => `<th>${escapeCell(value)}</th>`).join("")}</tr></thead>`;
+  const body = `<tbody>${rows.map(row => `<tr>${headers.map((_, index) => `<td>${escapeCell(row[index])}</td>`).join("")}</tr>`).join("")}</tbody>`;
+  const reportTitle = title || `Отчёт: ${name}`, generated = new Date().toLocaleString("ru-RU");
+  const html = `<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel" xmlns="http://www.w3.org/TR/REC-html40"><head><meta charset="utf-8"><style>
+    body{font-family:Arial,sans-serif;color:#1f2937}h1{font-size:18pt;margin:0 0 4pt}p{font-size:9pt;color:#6b7280;margin:0 0 12pt}
+    table{border-collapse:collapse;width:100%;font-size:9pt}th{background:#dbeaf5;color:#243746;font-weight:700;text-align:left;border:1px solid #9ca3af;padding:7px;white-space:normal;vertical-align:top}
+    td{border:1px solid #c7cdd3;padding:6px;white-space:normal;vertical-align:top}tbody tr:nth-child(even) td{background:#f4f7f9}
+  </style></head><body><h1>${escapeCell(reportTitle)}</h1><p>Сформировано: ${escapeCell(generated)} · строк: ${rows.length}</p><table>${head}${body}</table></body></html>`;
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(new Blob(["\ufeff", html], { type: "application/vnd.ms-excel;charset=utf-8" }));
+  link.download = `${name}_${today()}.xls`; link.click(); setTimeout(() => URL.revokeObjectURL(link.href), 1000); return true;
+}

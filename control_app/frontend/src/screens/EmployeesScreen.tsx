@@ -1,7 +1,7 @@
 import React, { useState, useMemo, useEffect, useRef } from "react";
 import { Button, KpiCard, SearchInput, DateInput, VehicleStatusBadge, EmptyState, Toast, Spinner } from "../components/ui";
 import { api, query } from "../api";
-import { dateRu, duration, exportTable, monthAgo, numberRu, reportStatus, time, today } from "../format";
+import { dateRu, duration, exportRows, monthAgo, numberRu, reportStatus, time, today } from "../format";
 
 type EmployeeRow = any;
 
@@ -13,6 +13,8 @@ interface EmployeesScreenProps {
 const th = "text-left text-xs font-medium text-[#6B7280] bg-[#F9FAFB] px-3 py-2.5 whitespace-nowrap border-b border-[#E5E7EB]";
 const td = "px-3 py-3 text-xs text-[#1F2937] border-b border-[#E5E7EB] whitespace-nowrap align-middle";
 const tdMuted = "px-3 py-3 text-xs text-[#9CA3AF] border-b border-[#E5E7EB] whitespace-nowrap align-middle";
+const employeeExportHeaders = ["Дата","Сотрудник","Должность","Объект","Вид работ","Автомобиль","Госномер","Водитель","Мастер","Бригада","Начало дня","Окончание дня","Выезд с базы","Прибытие на объект","Путь на объект","Остановки по пути на объект","Оценка пути на объект","Выезд с объекта","Возврат на базу","Путь на базу","Остановки по пути на базу","Оценка пути на базу","Время на объектах","Рабочий день","Переработка","Пробег","Подтверждение","Контроль","Комментарий"];
+const statusLabels: Record<string,string> = { confirmed:"Работа подтверждена",partial:"Подтверждено частично",unconfirmed:"Выезд не подтверждён","no-schedule":"Поездка без разнарядки","no-vehicle":"Автомобиль не определён","base-work":"Работа на базе" };
 
 function EmployeeMultiSelect({ selected, onChange, employees }: { selected: string[]; onChange: (v: string[]) => void; employees: string[] }) {
   const [open, setOpen] = useState(false);
@@ -107,6 +109,10 @@ function formatEmployeeRows(rows: any[]): EmployeeRow[] {
   }));
 }
 
+function employeeExportValues(row: EmployeeRow) {
+  return [row.date,row.employee,row.position,row.object,row.workType,row.vehicle,row.plate,row.driver,row.master,row.brigade,row.startDay,row.endDay,row.departBase,row.arriveObject,row.routeTime,row.stopsEnRoute,row.routeRating,row.departObject,row.returnBase,row.returnTime,row.stopsReturn,row.returnRating,row.onObject,row.workDay,row.overtime,row.mileage,statusLabels[row.status] || row.status,row.control,row.comment];
+}
+
 export default function EmployeesScreen({ onViewAnalytics, refreshToken }: EmployeesScreenProps) {
   const [dateFrom, setDateFrom] = useState(monthAgo());
   const [dateTo, setDateTo] = useState(today());
@@ -119,6 +125,7 @@ export default function EmployeesScreen({ onViewAnalytics, refreshToken }: Emplo
   const [requestKey, setRequestKey] = useState(0);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
+  const [exporting, setExporting] = useState(false);
   const [page, setPage] = useState(1);
   const [pagination, setPagination] = useState<any>({ page: 1, page_size: 50, total: 0, pages: 1 });
   const [applied, setApplied] = useState({ date_from: dateFrom, date_to: dateTo, employees: [] as string[] });
@@ -150,6 +157,17 @@ export default function EmployeesScreen({ onViewAnalytics, refreshToken }: Emplo
     return () => { cancelled = true; clearTimeout(timer); };
   }, [applied, page, search, requestKey, refreshToken]);
   useEffect(() => { pageCache.current.clear(); }, [requestKey, refreshToken]);
+
+  const exportAll = async () => {
+    setExporting(true);
+    try {
+      const result = await api<any>(`reports/people?${query({ date_from: applied.date_from, date_to: applied.date_to, employee: applied.employees, search, part: "all" })}`);
+      const rows = formatEmployeeRows(result.rows || []);
+      exportRows(employeeExportHeaders, rows.map(employeeExportValues), "сотрудники", "Отчёт по сотрудникам");
+      setToast(`В XLS выгружено строк: ${rows.length}`);
+    } catch (error) { setToast(error instanceof Error ? error.message : "Не удалось сформировать XLS"); }
+    finally { setExporting(false); }
+  };
 
   return (
     <div className="flex flex-col h-full">
@@ -185,7 +203,7 @@ export default function EmployeesScreen({ onViewAnalytics, refreshToken }: Emplo
             value={search}
             onChange={e => { setSearch(e.target.value); setPage(1); }}
             className="w-72"
-          /><Button variant="secondary" onClick={() => { exportTable("employees-table", "сотрудники", "Отчёт по сотрудникам"); setToast("Текущая страница XLS скачана"); }} icon={<svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" stroke="currentColor" strokeWidth="1.5"/><path d="M12 10v7m0 0-3-3m3 3 3-3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/></svg>}>Выгрузить страницу XLS</Button></div>
+          /><Button variant="secondary" disabled={exporting} onClick={exportAll} icon={<svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" stroke="currentColor" strokeWidth="1.5"/><path d="M12 10v7m0 0-3-3m3 3 3-3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/></svg>}>{exporting ? "Готовлю XLS…" : "Выгрузить XLS"}</Button></div>
         </div>
 
         <div className="flex-1 overflow-auto scrollable">

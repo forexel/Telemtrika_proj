@@ -1,12 +1,19 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { api, query } from "../api";
 import { Button, Checkbox, DateInput, EmptyState, KpiCard, SearchInput, Toast, VehicleStatusBadge, Spinner } from "../components/ui";
-import { dateRu, duration, exportTable, monthAgo, numberRu, reportStatus, time, today } from "../format";
+import { dateRu, duration, exportRows, monthAgo, numberRu, reportStatus, time, today } from "../format";
 
 interface Props { refreshToken: number; onViewAnalytics: (vehicleId: string) => void; }
 const th = "text-left text-xs font-medium text-[#6B7280] bg-[#F9FAFB] px-3 py-2.5 whitespace-nowrap border-b border-[#E5E7EB]";
 const td = "px-3 py-3 text-xs text-[#1F2937] border-b border-[#E5E7EB] whitespace-nowrap align-middle";
 const tdMuted = "px-3 py-3 text-xs text-[#9CA3AF] border-b border-[#E5E7EB] whitespace-nowrap align-middle";
+const vehicleExportHeaders = ["Дата","Объект","Вид работ","Автомобиль","Госномер","Водитель","Мастер","Бригада","Начало дня","Выезд с базы","Прибытие на объект","Путь на объект","Остановки по пути на объект","Оценка пути на объект","Выезд с объекта","Возврат на базу","Путь на базу","Остановки по пути на базу","Оценка пути на базу","Время на объектах","Рабочий день","Переработка","Пробег","Подтверждение","Контроль","Комментарий"];
+const statusLabels: Record<string,string> = { confirmed:"Работа подтверждена",partial:"Подтверждено частично",unconfirmed:"Выезд не подтверждён","no-schedule":"Поездка без разнарядки" };
+
+function vehicleExportValues(row: any) {
+  const hasPlan = Boolean(row.objects || row.work_object), status = reportStatus(row.confirmation_status);
+  return [dateRu(row.work_date),row.objects || row.work_object || "Нет разнарядки",row.work_types || (hasPlan ? "Вид работ не указан" : "Нет разнарядки"),row.vehicle_name,row.vehicle_plate,row.driver || (hasPlan ? "Не указан" : "Нет разнарядки"),row.masters || (hasPlan ? "Не указан" : "Нет разнарядки"),row.crew || (hasPlan ? "Не указана" : "Нет разнарядки"),row.workday_start || "08:00",time(row.base_departure),time(row.site_arrival),duration(row.outbound_seconds),duration(row.outbound_stops_seconds),row.outbound_assessment || "—",time(row.site_departure),time(row.base_return),duration(row.return_seconds),duration(row.return_stops_seconds),row.return_assessment || "—",duration(row.work_seconds ?? row.site_seconds),duration(row.workday_seconds),duration(row.overtime_seconds),row.distance_km == null ? "—" : `${numberRu(row.distance_km)} км`,statusLabels[status] || status,row.data_control || "Без замечаний",row.report_comment || row.deviation_comment || "Отклонений не выявлено"];
+}
 
 function VehicleMultiSelect({ vehicles, value, onChange }: { vehicles: any[]; value: string[] | null; onChange: (value: string[] | null) => void }) {
   const [open, setOpen] = useState(false);
@@ -96,6 +103,7 @@ export default function VehiclesScreen({ refreshToken, onViewAnalytics }: Props)
   const [search, setSearch] = useState("");
   const [data, setData] = useState<any>({ rows: [], totals: {}, vehicles: [] });
   const [loading, setLoading] = useState(true);
+  const [exporting, setExporting] = useState(false);
   const [error, setError] = useState("");
   const [requestKey, setRequestKey] = useState(0);
   const [expanded, setExpanded] = useState<string | null>(null);
@@ -135,6 +143,16 @@ export default function VehiclesScreen({ refreshToken, onViewAnalytics }: Props)
   useEffect(() => { setTripSegments({}); setExpanded(null); }, [requestKey, refreshToken, applied]);
   const rows = data.rows;
   const toggle = async (row: any) => { const key = `${row.work_date}|${row.vehicle_id}`; if (expanded === key) return setExpanded(null); setExpanded(key); if (tripSegments[key]) return; setTripLoading(key); setTripErrors(current => ({...current,[key]:""})); try { const result = await api<any>(`reports/vehicle-segments?${query({ date: row.work_date, vehicle_id: row.vehicle_id })}`); setTripSegments(current => ({...current,[key]:result.rows || []})); } catch (e) { const message = e instanceof Error ? e.message : "Не удалось загрузить поездки"; setTripErrors(current => ({...current,[key]:message})); setToast(message); } finally { setTripLoading(null); } };
+  const exportAll = async () => {
+    setExporting(true);
+    try {
+      const result = await api<any>(`reports/vehicles?${query({ ...applied, vehicle_none: applied.vehicle_id?.length === 0, search, part: "all" })}`);
+      const exportRowsData = result.rows || [];
+      exportRows(vehicleExportHeaders, exportRowsData.map(vehicleExportValues), "автомобили", "Отчёт по автомобилям");
+      setToast(`В XLS выгружено строк: ${exportRowsData.length}`);
+    } catch (error) { setToast(error instanceof Error ? error.message : "Не удалось сформировать XLS"); }
+    finally { setExporting(false); }
+  };
 
   return <div className="flex flex-col h-full">
     <div className="bg-white border-b border-[#E5E7EB] px-6 py-4"><div className="flex flex-wrap items-end gap-3">
@@ -154,7 +172,7 @@ export default function VehiclesScreen({ refreshToken, onViewAnalytics }: Props)
       <KpiCard label="Строк в отчёте" value={data.pagination?.total || 0} />
     </div></div>
     <div className="flex-1 overflow-hidden flex flex-col bg-white">
-      <div className="flex items-center justify-between px-6 py-3 border-b border-[#E5E7EB]"><span className="text-sm text-[#6B7280]">Показано: {rows.length} из {data.pagination?.total || 0} строк</span><div className="flex items-center gap-3"><SearchInput placeholder="Найти машину, водителя или объект" value={search} onChange={e => { setSearch(e.target.value); setPage(1); }} className="w-72" /><Button variant="secondary" onClick={() => { exportTable("vehicles-table", "автомобили", "Отчёт по автомобилям"); setToast("Таблица XLS скачана"); }} icon={<svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" stroke="currentColor" strokeWidth="1.5"/><path d="M12 10v7m0 0-3-3m3 3 3-3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/></svg>}>Выгрузить страницу XLS</Button></div></div>
+      <div className="flex items-center justify-between px-6 py-3 border-b border-[#E5E7EB]"><span className="text-sm text-[#6B7280]">Показано: {rows.length} из {data.pagination?.total || 0} строк</span><div className="flex items-center gap-3"><SearchInput placeholder="Найти машину, водителя или объект" value={search} onChange={e => { setSearch(e.target.value); setPage(1); }} className="w-72" /><Button variant="secondary" disabled={exporting} onClick={exportAll} icon={<svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" stroke="currentColor" strokeWidth="1.5"/><path d="M12 10v7m0 0-3-3m3 3 3-3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/></svg>}>{exporting ? "Готовлю XLS…" : "Выгрузить XLS"}</Button></div></div>
       <div className="flex-1 overflow-auto scrollable">
         {loading ? <div className="py-20 flex justify-center text-[#6B7280]"><Spinner size={24} /></div> : error ? <EmptyState title="Не удалось загрузить отчёт" description={error} /> : !rows.length ? <EmptyState title="Ничего не найдено" description="Измените период или отключите фильтр активных автомобилей" /> :
         <table id="vehicles-table" className="w-full border-collapse" style={{ minWidth: 3650 }}><thead className="sticky top-0 z-10"><tr>
